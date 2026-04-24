@@ -1,9 +1,9 @@
 {
-  "config_version": "2.0",
+  "config_version": "3.0",
   "project": {
-    "name": "Attention-LSTM PM2.5 72h Forecasting System",
+    "name": "基于 Attention-LSTM 的北京市 PM2.5 浓度 72 小时多步预测系统",
     "task_type": "pm25_72h_multi_step_forecasting",
-    "description": "Unified configuration for data, windows, models, evaluation, outputs, and runtime settings."
+    "description": "统一管理数据、窗口实验、模型、评估、输出路径与运行环境配置。"
   },
   "environment": {
     "python_version": "3.10+",
@@ -122,6 +122,26 @@
       72
     ]
   },
+  "window_experiments": [
+    {
+      "name": "input_168h",
+      "input_window_hours": 168,
+      "output_window_hours": 72,
+      "enabled": true
+    },
+    {
+      "name": "input_720h",
+      "input_window_hours": 720,
+      "output_window_hours": 72,
+      "enabled": true
+    },
+    {
+      "name": "input_2160h",
+      "input_window_hours": 2160,
+      "output_window_hours": 72,
+      "enabled": true
+    }
+  ],
   "split": {
     "method": "time_order",
     "train_ratio": 0.7,
@@ -202,7 +222,6 @@
       "enabled": true,
       "model_type": "machine_learning",
       "input_type": "flatten_window",
-      "input_dim_after_flatten": 1008,
       "output_dim": 72,
       "n_estimators": 300,
       "max_depth": 6,
@@ -217,7 +236,6 @@
       "enabled": true,
       "model_type": "machine_learning",
       "input_type": "flatten_window",
-      "input_dim_after_flatten": 1008,
       "output_dim": 72,
       "n_estimators": 200,
       "max_depth": 15,
@@ -238,21 +256,13 @@
       "epochs": 100,
       "early_stopping_patience": 15,
       "optimizer": "Adam",
-      "loss": "HuberLoss",
-      "huber_delta": 1.0,
-      "high_value_weighting": {
-        "enabled": false,
-        "mid_quantile": 0.75,
-        "high_quantile": 0.9,
-        "mid_weight": 2.0,
-        "high_weight": 3.0
-      },
+      "loss": "WeightedMSE",
+      "device": "gpu",
+      "seed": 42,
       "analysis": {
         "peak_quantile": 0.9,
         "peak_top_k": 5
-      },
-      "device": "gpu",
-      "seed": 42
+      }
     },
     "attention_lstm": {
       "enabled": true,
@@ -266,21 +276,13 @@
       "epochs": 100,
       "early_stopping_patience": 15,
       "optimizer": "Adam",
-      "loss": "HuberLoss",
-      "huber_delta": 1.0,
-      "high_value_weighting": {
-        "enabled": false,
-        "mid_quantile": 0.75,
-        "high_quantile": 0.9,
-        "mid_weight": 2.0,
-        "high_weight": 3.0
-      },
+      "loss": "WeightedMSE",
+      "device": "gpu",
+      "seed": 42,
       "analysis": {
         "peak_quantile": 0.9,
         "peak_top_k": 5
       },
-      "device": "gpu",
-      "seed": 42,
       "output_attention_weights": true,
       "attention_weights_path": "outputs/attention_lstm/attention_weights.npy"
     }

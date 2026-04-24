@@ -9,10 +9,11 @@ import numpy as np
 import pandas as pd
 
 from utils.config import resolve_path
+from utils.runtime import active_window_name
 
 
 def model_output_dir(config: dict[str, Any], model_name: str) -> Path:
-    """返回模型标准输出目录 outputs/{model}/。"""
+    """返回当前窗口实验下的模型输出目录。"""
     return resolve_path(config["outputs"]["model_dirs"][model_name])
 
 
@@ -30,10 +31,7 @@ def save_predictions(
     y_pred: np.ndarray,
     target_timestamps: np.ndarray,
 ) -> Path:
-    """保存前端和评估模块共同依赖的预测结果。
-
-    每个测试样本有 72 行记录，timestamp 对应未来目标时间点，horizon 对应第几小时预测。
-    """
+    """保存统一预测结果。"""
     output_dir = prepare_model_output_dir(config, model_name)
     rows: list[dict[str, Any]] = []
     sample_count, horizon_count = y_true.shape
@@ -57,7 +55,7 @@ def save_predictions(
 
 
 def save_metrics(config: dict[str, Any], model_name: str, metrics: dict[str, Any]) -> Path:
-    """保存统一指标文件 metrics.json。"""
+    """保存 metrics.json。"""
     output_dir = prepare_model_output_dir(config, model_name)
     path = output_dir / "metrics.json"
     with path.open("w", encoding="utf-8") as f:
@@ -66,7 +64,7 @@ def save_metrics(config: dict[str, Any], model_name: str, metrics: dict[str, Any
 
 
 def save_config_snapshot(config: dict[str, Any], model_name: str) -> Path:
-    """保存本次运行配置快照，方便论文结果复现。"""
+    """保存本次运行配置快照。"""
     output_dir = prepare_model_output_dir(config, model_name)
     path = output_dir / "config_snapshot.json"
     serializable = {k: v for k, v in config.items() if not k.startswith("_")}
@@ -76,19 +74,17 @@ def save_config_snapshot(config: dict[str, Any], model_name: str) -> Path:
 
 
 def copy_metrics_to_summary(config: dict[str, Any], model_name: str) -> None:
-    """把各模型指标复制到汇总目录，便于后续前端或论文汇总使用。"""
+    """复制单模型 metrics.json 到汇总目录，文件名包含窗口名。"""
     src = model_output_dir(config, model_name) / "metrics.json"
     dst_dir = resolve_path(config["paths"]["metrics_summary_dir"])
     dst_dir.mkdir(parents=True, exist_ok=True)
     if src.exists():
-        shutil.copy2(src, dst_dir / f"{model_name}_metrics.json")
+        window_name = active_window_name(config)
+        shutil.copy2(src, dst_dir / f"{window_name}_{model_name}_metrics.json")
 
 
 def save_metrics_tables(config: dict[str, Any], model_name: str, metrics: dict[str, Any]) -> None:
-    """额外保存分阶段和逐 horizon 指标表。
-
-    metrics.json 保持主接口不变；CSV 表方便论文直接引用和绘图。
-    """
+    """额外保存分阶段和逐 horizon 指标 CSV。"""
     output_dir = prepare_model_output_dir(config, model_name)
     stage_rows = [{"stage": stage, **values} for stage, values in metrics["stages"].items()]
     pd.DataFrame(stage_rows).to_csv(output_dir / "stage_metrics.csv", index=False, encoding="utf-8")
@@ -96,30 +92,44 @@ def save_metrics_tables(config: dict[str, Any], model_name: str, metrics: dict[s
 
 
 def save_training_history(config: dict[str, Any], model_name: str, history: list[dict[str, Any]]) -> None:
-    """保存训练和验证损失曲线数据。
-
-    training_log.json 提供摘要信息，training_history.csv 便于后续直接画图或写论文。
-    """
+    """保存训练过程曲线数据，不覆盖运行级 training_log.json。"""
     if not history:
         return
     output_dir = prepare_model_output_dir(config, model_name)
-    best_row = min(history, key=lambda row: float(row["validation_loss"]))
-    training_log = {
-        "best_epoch": int(best_row["epoch"]),
-        "best_validation_loss": float(best_row["validation_loss"]),
-        "early_stopping_epoch": int(history[-1]["epoch"]),
-        "epochs_completed": int(len(history)),
-        "history": history,
-    }
-    with (output_dir / "training_log.json").open("w", encoding="utf-8") as f:
-        json.dump(training_log, f, ensure_ascii=False, indent=2)
     with (output_dir / "training_history.json").open("w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
     pd.DataFrame(history).to_csv(output_dir / "training_history.csv", index=False, encoding="utf-8")
 
 
+def save_execution_log(
+    config: dict[str, Any],
+    model_name: str,
+    execution_log: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+) -> Path:
+    """保存模型运行日志与状态。"""
+    output_dir = prepare_model_output_dir(config, model_name)
+    log_payload = dict(execution_log)
+
+    if history:
+        best_row = min(history, key=lambda row: float(row["validation_loss"]))
+        log_payload.update(
+            {
+                "best_epoch": int(best_row["epoch"]),
+                "best_validation_loss": float(best_row["validation_loss"]),
+                "early_stopping_epoch": int(history[-1]["epoch"]),
+                "epochs_completed": int(len(history)),
+            }
+        )
+
+    path = output_dir / "training_log.json"
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(log_payload, f, ensure_ascii=False, indent=2)
+    return path
+
+
 def save_attention_stats(config: dict[str, Any], model_name: str, attention_weights: np.ndarray) -> Path:
-    """保存 Attention 权重统计，用于判断权重是否接近平均分布。"""
+    """保存 Attention 权重统计。"""
     output_dir = prepare_model_output_dir(config, model_name)
     weights = np.asarray(attention_weights, dtype=float)
     entropy = -(weights * np.log(np.clip(weights, 1e-12, None))).sum(axis=1)
@@ -143,7 +153,6 @@ def save_attention_stats(config: dict[str, Any], model_name: str, attention_weig
         "entropy_std": float(entropy.std()),
         "uniform_entropy": uniform_entropy,
         "entropy_ratio_to_uniform": float(entropy.mean() / uniform_entropy),
-        # 这里故意把阈值收紧到 0.999，用于捕捉“几乎完全均匀”的退化注意力。
         "near_uniform": bool(entropy.mean() / uniform_entropy > 0.999),
         "top_mean_weight_steps": [
             {"input_step": int(index + 1), "mean_weight": float(mean_weights[index])}
@@ -163,10 +172,7 @@ def save_peak_analysis(
     y_pred: np.ndarray,
     target_timestamps: np.ndarray,
 ) -> dict[str, Any]:
-    """保存测试集中高 PM2.5 样本的逐 horizon 对比。
-
-    选取真实峰值最高的若干测试样本，不改变原 predictions.csv，只额外输出论文分析文件。
-    """
+    """保存测试集中高峰值样本的逐 horizon 对比。"""
     output_dir = prepare_model_output_dir(config, model_name)
     analysis_cfg = config["models"][model_name].get("analysis", {})
     peak_quantile = float(analysis_cfg.get("peak_quantile", 0.9))
@@ -205,3 +211,17 @@ def save_peak_analysis(
     with (output_dir / "peak_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     return summary
+
+
+def save_metrics_summary_tables(
+    config: dict[str, Any],
+    window_rows: list[dict[str, Any]],
+    stage_rows: list[dict[str, Any]],
+    horizon_rows: list[dict[str, Any]],
+) -> None:
+    """生成跨窗口、跨模型的汇总指标 CSV。"""
+    summary_dir = resolve_path(config["paths"]["metrics_summary_dir"])
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(window_rows).to_csv(summary_dir / "window_model_metrics.csv", index=False, encoding="utf-8")
+    pd.DataFrame(stage_rows).to_csv(summary_dir / "stage_metrics_summary.csv", index=False, encoding="utf-8")
+    pd.DataFrame(horizon_rows).to_csv(summary_dir / "horizon_metrics_summary.csv", index=False, encoding="utf-8")

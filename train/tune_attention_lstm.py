@@ -196,7 +196,11 @@ def _save_best_outputs(
         evaluation["y_true"],
         evaluation["y_pred"],
         evaluation["metrics"],
+        evaluation["timestamps"],
         output_dir / "plots",
+        "tuning",
+        model_name,
+        int(config["window"]["output_window_hours"]),
         attention_weights,
     )
 
@@ -216,8 +220,12 @@ def _save_best_outputs(
         plot_peak_case(
             evaluation["y_true"],
             evaluation["y_pred"],
+            evaluation["timestamps"],
             peak_summary["selected_sample_ids"][0],
             output_dir / "plots",
+            "tuning",
+            model_name,
+            int(config["window"]["output_window_hours"]),
         )
 
 

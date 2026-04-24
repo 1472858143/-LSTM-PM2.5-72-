@@ -1,0 +1,60 @@
+{
+  "input_window": 720,
+  "output_window": 72,
+  "feature_columns": [
+    "temperature_2m",
+    "humidity",
+    "wind_speed_10m",
+    "precipitation",
+    "surface_pressure",
+    "pm2_5"
+  ],
+  "target_column": "pm2_5",
+  "splits": {
+    "train": {
+      "created": 13371,
+      "skipped_nan": 0,
+      "skipped_non_hourly": 0,
+      "rows": 14162,
+      "X_shape": [
+        13371,
+        720,
+        6
+      ],
+      "y_shape": [
+        13371,
+        72
+      ]
+    },
+    "validation": {
+      "created": 2243,
+      "skipped_nan": 0,
+      "skipped_non_hourly": 0,
+      "rows": 3034,
+      "X_shape": [
+        2243,
+        720,
+        6
+      ],
+      "y_shape": [
+        2243,
+        72
+      ]
+    },
+    "test": {
+      "created": 2245,
+      "skipped_nan": 0,
+      "skipped_non_hourly": 0,
+      "rows": 3036,
+      "X_shape": [
+        2245,
+        720,
+        6
+      ],
+      "y_shape": [
+        2245,
+        72
+      ]
+    }
+  }
+}

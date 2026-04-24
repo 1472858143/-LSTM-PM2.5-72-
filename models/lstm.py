@@ -4,12 +4,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm import tqdm
 
 from models.base import BaseForecastModel
+from utils.runtime import runtime_label, runtime_write
 
 
 def weighted_mse_loss(y_pred: Any, y_true: Any, q75: float, q90: float):
-    """Apply weighted MSE on multi-step targets with shape (B, 72)."""
+    """对多步预测目标应用加权 MSE，shape 支持 (B, 72)。"""
     import torch
 
     weights = torch.ones_like(y_true)
@@ -20,7 +22,7 @@ def weighted_mse_loss(y_pred: Any, y_true: Any, q75: float, q90: float):
 
 
 class LSTMForecastModel(BaseForecastModel):
-    """LSTM forecaster with the existing direct 72-step output head."""
+    """基础 LSTM 多变量多步预测模型。"""
 
     name = "lstm"
 
@@ -81,8 +83,13 @@ class LSTMForecastModel(BaseForecastModel):
         self.training_history = []
         self.weighted_loss_thresholds = self._prepare_weighted_loss_thresholds(data)
         self.high_value_thresholds = self.weighted_loss_thresholds
-        print(f"LSTM weighted loss thresholds: q75={self.weighted_loss_thresholds['q75']:.6f}, q90={self.weighted_loss_thresholds['q90']:.6f}")
+        runtime_write(
+            self.config,
+            f"q75={self.weighted_loss_thresholds['q75']:.6f}, q90={self.weighted_loss_thresholds['q90']:.6f}",
+        )
+
         optimizer = torch.optim.Adam(self.network.parameters(), lr=float(self.model_config["learning_rate"]))
+        current_lr = float(self.model_config["learning_rate"])
 
         X_train = torch.tensor(data["X_train"], dtype=torch.float32)
         y_train = torch.tensor(data["y_train"], dtype=torch.float32)
@@ -104,8 +111,14 @@ class LSTMForecastModel(BaseForecastModel):
         best_val_loss = float("inf")
         patience = int(self.model_config["early_stopping_patience"])
         bad_epochs = 0
+        epoch_bar = tqdm(
+            range(int(self.model_config["epochs"])),
+            desc=f"{runtime_label(self.config)} Epoch",
+            leave=False,
+            dynamic_ncols=True,
+        )
 
-        for _ in range(int(self.model_config["epochs"])):
+        for epoch_idx in epoch_bar:
             self.network.train()
             train_losses: list[float] = []
             train_mean_weights: list[float] = []
@@ -125,7 +138,7 @@ class LSTMForecastModel(BaseForecastModel):
                 train_peak_ratios.append(weight_stats["peak_ratio"])
 
             val_loss, val_mean_weight, val_peak_ratio = self._evaluate_loss(val_loader)
-            epoch = len(self.training_history) + 1
+            epoch = epoch_idx + 1
             history_row = {
                 "epoch": epoch,
                 "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
@@ -151,14 +164,25 @@ class LSTMForecastModel(BaseForecastModel):
                 history_row["bad_epochs"] = bad_epochs
 
             self.training_history.append(history_row)
+            epoch_bar.set_postfix(
+                {
+                    "epoch": f"{epoch}/{int(self.model_config['epochs'])}",
+                    "train_loss": f"{history_row['train_loss']:.4f}",
+                    "val_loss": f"{history_row['validation_loss']:.4f}",
+                    "best": f"{best_val_loss:.4f}",
+                    "patience": f"{bad_epochs}/{patience}",
+                    "lr": f"{current_lr:.5f}",
+                }
+            )
             if bad_epochs >= patience:
                 break
 
+        epoch_bar.close()
         if best_state is not None:
             self.network.load_state_dict(best_state)
 
     def _prepare_weighted_loss_thresholds(self, data: dict[str, Any]) -> dict[str, float]:
-        """Estimate q75/q90 from raw training PM2.5 only, without leakage."""
+        """仅基于训练集原始 PM2.5 计算 q75/q90，避免数据泄露。"""
         target_column = data["target_column"]
         train_target = np.asarray(data["splits_raw"]["train"][target_column], dtype=float)
         scaler = data["scaler"]
@@ -173,10 +197,7 @@ class LSTMForecastModel(BaseForecastModel):
         if self.weighted_loss_thresholds is None:
             raise RuntimeError("加权 MSE 阈值尚未初始化。")
         target_min = float(self.weighted_loss_thresholds["target_min"])
-        target_range = max(
-            float(self.weighted_loss_thresholds["target_max"]) - target_min,
-            1e-12,
-        )
+        target_range = max(float(self.weighted_loss_thresholds["target_max"]) - target_min, 1e-12)
         return values * target_range + target_min
 
     def _compute_loss(self, predictions: Any, targets: Any) -> tuple[Any, dict[str, float]]:

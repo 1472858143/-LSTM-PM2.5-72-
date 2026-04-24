@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import itertools
 import pickle
+import warnings
 from pathlib import Path
 from typing import Any
-import warnings
 
 import numpy as np
+from tqdm import tqdm
 
 from models.base import BaseForecastModel
+from utils.runtime import runtime_label, runtime_write
 
 
 class SARIMAForecastModel(BaseForecastModel):
-    """SARIMA 单变量季节性基线模型。
-
-    SARIMA 与 ARIMA 一样只使用 pm2_5，但额外建模 24 小时日周期，
-    用于判断显式季节性结构对 72 小时预测的贡献。
-    """
+    """SARIMA 单变量季节性基线模型。"""
 
     name = "sarima"
 
@@ -27,10 +25,9 @@ class SARIMAForecastModel(BaseForecastModel):
         self.selection_score: float | None = None
 
     def fit(self, data: dict[str, Any]) -> None:
-        print("SARIMA START")
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-        # 只在训练集上做阶数搜索，保持测试集独立。
+        runtime_write(self.config, "Parameter selection start...")
         train_series = data["splits_scaled"]["train"][self.config["data"]["target"]].dropna().to_numpy(dtype=float)
         max_points = int(self.model_config["selection_train_points"])
         if len(train_series) > max_points:
@@ -42,10 +39,12 @@ class SARIMAForecastModel(BaseForecastModel):
         best_order: tuple[int, int, int] | None = None
         best_seasonal: tuple[int, int, int, int] | None = None
 
-        orders = itertools.product(
-            self.model_config["p_values"],
-            self.model_config["d_values"],
-            self.model_config["q_values"],
+        orders = list(
+            itertools.product(
+                self.model_config["p_values"],
+                self.model_config["d_values"],
+                self.model_config["q_values"],
+            )
         )
         seasonal_orders = list(
             itertools.product(
@@ -55,29 +54,34 @@ class SARIMAForecastModel(BaseForecastModel):
             )
         )
 
-        # 非季节项和季节项搜索范围均来自 config，季节周期固定为 24 小时。
+        combos: list[tuple[tuple[int, int, int], tuple[int, int, int, int]]] = []
         for order in orders:
             for seasonal in seasonal_orders:
                 if order == (0, 0, 0) and seasonal == (0, 0, 0):
                     continue
-                seasonal_order = tuple(int(v) for v in seasonal) + (period,)
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        result = SARIMAX(
-                            train_series,
-                            order=order,
-                            seasonal_order=seasonal_order,
-                            enforce_stationarity=False,
-                            enforce_invertibility=False,
-                        ).fit(disp=False)
-                    score = getattr(result, criterion)
-                    if score < best_score:
-                        best_score = float(score)
-                        best_order = tuple(int(v) for v in order)
-                        best_seasonal = seasonal_order
-                except Exception:
-                    continue
+                combos.append((tuple(int(v) for v in order), tuple(int(v) for v in seasonal) + (period,)))
+
+        progress = tqdm(combos, desc=f"{runtime_label(self.config)} SARIMA search", leave=False, dynamic_ncols=True)
+        for order, seasonal_order in progress:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    result = SARIMAX(
+                        train_series,
+                        order=order,
+                        seasonal_order=seasonal_order,
+                        enforce_stationarity=False,
+                        enforce_invertibility=False,
+                    ).fit(disp=False)
+                score = float(getattr(result, criterion))
+                progress.set_postfix({"best": best_score if np.isfinite(best_score) else None, "order": order})
+                if score < best_score:
+                    best_score = score
+                    best_order = order
+                    best_seasonal = seasonal_order
+            except Exception:
+                continue
+        progress.close()
 
         if best_order is None or best_seasonal is None:
             best_order = (1, 0, 0)
@@ -87,21 +91,22 @@ class SARIMAForecastModel(BaseForecastModel):
         self.order = best_order
         self.seasonal_order = best_seasonal
         self.selection_score = best_score
+        runtime_write(self.config, f"Selected order={self.order}, seasonal_order={self.seasonal_order}, {criterion}={self.selection_score}")
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
-        print("SARIMA PREDICT START")
         if self.order is None or self.seasonal_order is None:
             raise RuntimeError("SARIMA 尚未 fit。")
 
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
+        runtime_write(self.config, "Rolling forecast start...")
         target_index = data["feature_columns"].index(self.config["data"]["target"])
         X_test = data["X_test"]
         horizon = int(self.model_config["forecast_horizon"])
         predictions: list[np.ndarray] = []
 
-        for sample in X_test:
-            # 从统一窗口中抽取 pm2_5 列，保证 SARIMA 不使用任何气象特征。
+        progress = tqdm(X_test, desc=f"{runtime_label(self.config)} SARIMA predict", leave=False, dynamic_ncols=True)
+        for sample in progress:
             series = sample[:, target_index].astype(float)
             try:
                 with warnings.catch_warnings():
@@ -115,9 +120,9 @@ class SARIMAForecastModel(BaseForecastModel):
                     ).fit(disp=False)
                 forecast = np.asarray(result.forecast(steps=horizon), dtype=float)
             except Exception:
-                # 个别窗口拟合失败时回退到持久性预测，避免影响结果文件生成。
                 forecast = np.repeat(series[-1], horizon).astype(float)
             predictions.append(forecast)
+        progress.close()
 
         return np.asarray(predictions, dtype=np.float32)
 
