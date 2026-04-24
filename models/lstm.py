@@ -4,14 +4,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from tqdm import tqdm
 
 from models.base import BaseForecastModel
-from utils.runtime import runtime_label, runtime_write
+from utils.runtime import runtime_add_task, runtime_label, runtime_remove_task, runtime_update_task, runtime_write
 
 
 def weighted_mse_loss(y_pred: Any, y_true: Any, q75: float, q90: float):
-    """对多步预测目标应用加权 MSE，shape 支持 (B, 72)。"""
+    """Apply weighted MSE to multi-step targets with shape (B, 72)."""
     import torch
 
     weights = torch.ones_like(y_true)
@@ -21,8 +20,32 @@ def weighted_mse_loss(y_pred: Any, y_true: Any, q75: float, q90: float):
     return loss, weights
 
 
+def _metric_text(value: float) -> str:
+    return "-" if not np.isfinite(value) else f"{value:.6f}"
+
+
+def _format_epoch_stats(
+    epoch: int,
+    total_epochs: int,
+    train_loss: float,
+    val_loss: float,
+    best_val_loss: float,
+    bad_epochs: int,
+    patience: int,
+    current_lr: float,
+) -> str:
+    return (
+        f"epoch={epoch}/{total_epochs} "
+        f"train={_metric_text(train_loss)} "
+        f"val={_metric_text(val_loss)} "
+        f"best={_metric_text(best_val_loss)} "
+        f"patience={bad_epochs}/{patience} "
+        f"lr={current_lr:.6g}"
+    )
+
+
 class LSTMForecastModel(BaseForecastModel):
-    """基础 LSTM 多变量多步预测模型。"""
+    """Core LSTM multi-variate multi-step forecasting model."""
 
     name = "lstm"
 
@@ -76,7 +99,7 @@ class LSTMForecastModel(BaseForecastModel):
         from torch.utils.data import DataLoader, TensorDataset
 
         if not torch.cuda.is_available():
-            raise RuntimeError("LSTM 训练要求 CUDA GPU，但当前 CUDA 不可用。")
+            raise RuntimeError("LSTM training requires a CUDA GPU, but CUDA is unavailable.")
 
         self.device = torch.device("cuda")
         self.network = self._build_network().to(self.device)
@@ -109,80 +132,89 @@ class LSTMForecastModel(BaseForecastModel):
 
         best_state = None
         best_val_loss = float("inf")
+        total_epochs = int(self.model_config["epochs"])
         patience = int(self.model_config["early_stopping_patience"])
         bad_epochs = 0
-        epoch_bar = tqdm(
-            range(int(self.model_config["epochs"])),
-            desc=f"{runtime_label(self.config)} Epoch",
-            leave=False,
-            dynamic_ncols=True,
+        epoch_task_id = runtime_add_task(
+            self.config,
+            f"{runtime_label(self.config)} Epochs",
+            total=total_epochs,
+            stats=_format_epoch_stats(0, total_epochs, float("nan"), float("nan"), float("nan"), 0, patience, current_lr),
         )
 
-        for epoch_idx in epoch_bar:
-            self.network.train()
-            train_losses: list[float] = []
-            train_mean_weights: list[float] = []
-            train_peak_ratios: list[float] = []
+        try:
+            for epoch_idx in range(total_epochs):
+                self.network.train()
+                train_losses: list[float] = []
+                train_mean_weights: list[float] = []
+                train_peak_ratios: list[float] = []
 
-            for batch_X, batch_y in train_loader:
-                batch_X = batch_X.to(self.device)
-                batch_y = batch_y.to(self.device)
-                optimizer.zero_grad()
-                predictions = self.network(batch_X)
-                loss, weight_stats = self._compute_loss(predictions, batch_y)
-                loss.backward()
-                optimizer.step()
+                for batch_X, batch_y in train_loader:
+                    batch_X = batch_X.to(self.device)
+                    batch_y = batch_y.to(self.device)
+                    optimizer.zero_grad()
+                    predictions = self.network(batch_X)
+                    loss, weight_stats = self._compute_loss(predictions, batch_y)
+                    loss.backward()
+                    optimizer.step()
 
-                train_losses.append(float(loss.item()))
-                train_mean_weights.append(weight_stats["mean_weight"])
-                train_peak_ratios.append(weight_stats["peak_ratio"])
+                    train_losses.append(float(loss.item()))
+                    train_mean_weights.append(weight_stats["mean_weight"])
+                    train_peak_ratios.append(weight_stats["peak_ratio"])
 
-            val_loss, val_mean_weight, val_peak_ratio = self._evaluate_loss(val_loader)
-            epoch = epoch_idx + 1
-            history_row = {
-                "epoch": epoch,
-                "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
-                "validation_loss": float(val_loss),
-                "best_validation_loss": float(min(best_val_loss, val_loss)),
-                "bad_epochs": bad_epochs,
-                "q75": float(self.weighted_loss_thresholds["q75"]),
-                "q90": float(self.weighted_loss_thresholds["q90"]),
-                "train_mean_weight": float(np.mean(train_mean_weights)) if train_mean_weights else float("nan"),
-                "validation_mean_weight": float(val_mean_weight),
-                "train_peak_ratio": float(np.mean(train_peak_ratios)) if train_peak_ratios else float("nan"),
-                "validation_peak_ratio": float(val_peak_ratio),
-            }
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                history_row["best_validation_loss"] = float(best_val_loss)
-                best_state = {k: v.detach().cpu().clone() for k, v in self.network.state_dict().items()}
-                bad_epochs = 0
-                history_row["bad_epochs"] = bad_epochs
-            else:
-                bad_epochs += 1
-                history_row["bad_epochs"] = bad_epochs
-
-            self.training_history.append(history_row)
-            epoch_bar.set_postfix(
-                {
-                    "epoch": f"{epoch}/{int(self.model_config['epochs'])}",
-                    "train_loss": f"{history_row['train_loss']:.4f}",
-                    "val_loss": f"{history_row['validation_loss']:.4f}",
-                    "best": f"{best_val_loss:.4f}",
-                    "patience": f"{bad_epochs}/{patience}",
-                    "lr": f"{current_lr:.5f}",
+                val_loss, val_mean_weight, val_peak_ratio = self._evaluate_loss(val_loader)
+                epoch = epoch_idx + 1
+                history_row = {
+                    "epoch": epoch,
+                    "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
+                    "validation_loss": float(val_loss),
+                    "best_validation_loss": float(min(best_val_loss, val_loss)),
+                    "bad_epochs": bad_epochs,
+                    "q75": float(self.weighted_loss_thresholds["q75"]),
+                    "q90": float(self.weighted_loss_thresholds["q90"]),
+                    "train_mean_weight": float(np.mean(train_mean_weights)) if train_mean_weights else float("nan"),
+                    "validation_mean_weight": float(val_mean_weight),
+                    "train_peak_ratio": float(np.mean(train_peak_ratios)) if train_peak_ratios else float("nan"),
+                    "validation_peak_ratio": float(val_peak_ratio),
                 }
-            )
-            if bad_epochs >= patience:
-                break
 
-        epoch_bar.close()
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    history_row["best_validation_loss"] = float(best_val_loss)
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.network.state_dict().items()}
+                    bad_epochs = 0
+                    history_row["bad_epochs"] = bad_epochs
+                else:
+                    bad_epochs += 1
+                    history_row["bad_epochs"] = bad_epochs
+
+                self.training_history.append(history_row)
+                runtime_update_task(
+                    self.config,
+                    epoch_task_id,
+                    advance=1,
+                    stats=_format_epoch_stats(
+                        epoch,
+                        total_epochs,
+                        float(history_row["train_loss"]),
+                        float(history_row["validation_loss"]),
+                        float(best_val_loss),
+                        bad_epochs,
+                        patience,
+                        current_lr,
+                    ),
+                )
+
+                if bad_epochs >= patience:
+                    break
+        finally:
+            runtime_remove_task(self.config, epoch_task_id)
+
         if best_state is not None:
             self.network.load_state_dict(best_state)
 
     def _prepare_weighted_loss_thresholds(self, data: dict[str, Any]) -> dict[str, float]:
-        """仅基于训练集原始 PM2.5 计算 q75/q90，避免数据泄露。"""
+        """Compute q75/q90 only from the raw training PM2.5 series."""
         target_column = data["target_column"]
         train_target = np.asarray(data["splits_raw"]["train"][target_column], dtype=float)
         scaler = data["scaler"]
@@ -195,14 +227,14 @@ class LSTMForecastModel(BaseForecastModel):
 
     def _inverse_transform_target_tensor(self, values: Any) -> Any:
         if self.weighted_loss_thresholds is None:
-            raise RuntimeError("加权 MSE 阈值尚未初始化。")
+            raise RuntimeError("Weighted loss thresholds have not been initialized.")
         target_min = float(self.weighted_loss_thresholds["target_min"])
         target_range = max(float(self.weighted_loss_thresholds["target_max"]) - target_min, 1e-12)
         return values * target_range + target_min
 
     def _compute_loss(self, predictions: Any, targets: Any) -> tuple[Any, dict[str, float]]:
         if self.weighted_loss_thresholds is None:
-            raise RuntimeError("加权 MSE 阈值尚未初始化。")
+            raise RuntimeError("Weighted loss thresholds have not been initialized.")
 
         predictions_raw = self._inverse_transform_target_tensor(predictions)
         targets_raw = self._inverse_transform_target_tensor(targets)
@@ -245,7 +277,7 @@ class LSTMForecastModel(BaseForecastModel):
         from torch.utils.data import DataLoader, TensorDataset
 
         if self.network is None:
-            raise RuntimeError("LSTM 尚未 fit。")
+            raise RuntimeError("LSTM has not been fit yet.")
         self.network.eval()
         X_test = torch.tensor(data["X_test"], dtype=torch.float32)
         loader = DataLoader(
@@ -264,7 +296,7 @@ class LSTMForecastModel(BaseForecastModel):
         import torch
 
         if self.network is None:
-            raise RuntimeError("LSTM 尚未 fit，无法保存。")
+            raise RuntimeError("LSTM has not been fit yet, so it cannot be saved.")
         torch.save(
             {
                 "model_name": self.name,

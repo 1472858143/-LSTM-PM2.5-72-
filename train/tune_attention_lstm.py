@@ -13,6 +13,7 @@ import pandas as pd
 from models.attention_lstm import AttentionLSTMForecastModel
 from train.trainer import _validate_window_data
 from utils.config import dump_json, ensure_project_dirs, load_config, resolve_path
+from utils.console_utils import get_console, setup_console_encoding
 from utils.data_loader import prepare_window_data
 from utils.env import check_environment
 from utils.metrics import compute_all_metrics
@@ -231,6 +232,8 @@ def _save_best_outputs(
 
 def main() -> None:
     """执行 Attention-LSTM 网格调参，并导出最优组合的正式测试集结果。"""
+    setup_console_encoding()
+    console = get_console()
     args = parse_args()
     base_config = load_config(args.config)
     tuning_cfg = _load_tuning_config(base_config)
@@ -262,7 +265,7 @@ def main() -> None:
 
         results.append(row)
         _write_results_csv(tuning_cfg["results_csv"], results)
-        print(
+        console.print(
             json.dumps(
                 {
                     "trial": f"{index}/{len(search_space)}",
@@ -270,7 +273,8 @@ def main() -> None:
                     "metrics": {key: row[key] for key in ["RMSE", "MAE", "R2", "Max_Error", "amplitude_pred"]},
                 },
                 ensure_ascii=False,
-            )
+            ),
+            markup=False,
         )
 
     successful_rows = [row for row in results if row["R2"] is not None]
@@ -309,7 +313,7 @@ def main() -> None:
         "results_csv": str(resolve_path(tuning_cfg["results_csv"])),
     }
     dump_json(summary, tuning_cfg["best_params_json"])
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    console.print(json.dumps(summary, ensure_ascii=False, indent=2), markup=False)
 
 
 if __name__ == "__main__":

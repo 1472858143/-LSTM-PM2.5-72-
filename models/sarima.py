@@ -7,14 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from tqdm import tqdm
 
 from models.base import BaseForecastModel
-from utils.runtime import runtime_label, runtime_write
+from utils.runtime import runtime_add_task, runtime_label, runtime_remove_task, runtime_update_task, runtime_write
 
 
 class SARIMAForecastModel(BaseForecastModel):
-    """SARIMA 单变量季节性基线模型。"""
+    """SARIMA seasonal single-variable baseline model."""
 
     name = "sarima"
 
@@ -61,27 +60,44 @@ class SARIMAForecastModel(BaseForecastModel):
                     continue
                 combos.append((tuple(int(v) for v in order), tuple(int(v) for v in seasonal) + (period,)))
 
-        progress = tqdm(combos, desc=f"{runtime_label(self.config)} SARIMA search", leave=False, dynamic_ncols=True)
-        for order, seasonal_order in progress:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    result = SARIMAX(
-                        train_series,
-                        order=order,
-                        seasonal_order=seasonal_order,
-                        enforce_stationarity=False,
-                        enforce_invertibility=False,
-                    ).fit(disp=False)
-                score = float(getattr(result, criterion))
-                progress.set_postfix({"best": best_score if np.isfinite(best_score) else None, "order": order})
-                if score < best_score:
-                    best_score = score
-                    best_order = order
-                    best_seasonal = seasonal_order
-            except Exception:
-                continue
-        progress.close()
+        search_task_id = runtime_add_task(
+            self.config,
+            f"{runtime_label(self.config)} Search",
+            total=len(combos),
+            stats="best=- order=-",
+        )
+        try:
+            for order, seasonal_order in combos:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        result = SARIMAX(
+                            train_series,
+                            order=order,
+                            seasonal_order=seasonal_order,
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        ).fit(disp=False)
+                    score = float(getattr(result, criterion))
+                    if score < best_score:
+                        best_score = score
+                        best_order = order
+                        best_seasonal = seasonal_order
+                except Exception:
+                    pass
+
+                runtime_update_task(
+                    self.config,
+                    search_task_id,
+                    advance=1,
+                    stats=(
+                        f"best={best_score:.6f} order={best_order or order}"
+                        if np.isfinite(best_score)
+                        else f"best=- order={order}"
+                    ),
+                )
+        finally:
+            runtime_remove_task(self.config, search_task_id)
 
         if best_order is None or best_seasonal is None:
             best_order = (1, 0, 0)
@@ -91,11 +107,14 @@ class SARIMAForecastModel(BaseForecastModel):
         self.order = best_order
         self.seasonal_order = best_seasonal
         self.selection_score = best_score
-        runtime_write(self.config, f"Selected order={self.order}, seasonal_order={self.seasonal_order}, {criterion}={self.selection_score}")
+        runtime_write(
+            self.config,
+            f"Selected order={self.order}, seasonal_order={self.seasonal_order}, {criterion}={self.selection_score}",
+        )
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
         if self.order is None or self.seasonal_order is None:
-            raise RuntimeError("SARIMA 尚未 fit。")
+            raise RuntimeError("SARIMA has not been fit yet.")
 
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
@@ -105,24 +124,32 @@ class SARIMAForecastModel(BaseForecastModel):
         horizon = int(self.model_config["forecast_horizon"])
         predictions: list[np.ndarray] = []
 
-        progress = tqdm(X_test, desc=f"{runtime_label(self.config)} SARIMA predict", leave=False, dynamic_ncols=True)
-        for sample in progress:
-            series = sample[:, target_index].astype(float)
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    result = SARIMAX(
-                        series,
-                        order=self.order,
-                        seasonal_order=self.seasonal_order,
-                        enforce_stationarity=False,
-                        enforce_invertibility=False,
-                    ).fit(disp=False)
-                forecast = np.asarray(result.forecast(steps=horizon), dtype=float)
-            except Exception:
-                forecast = np.repeat(series[-1], horizon).astype(float)
-            predictions.append(forecast)
-        progress.close()
+        predict_task_id = runtime_add_task(
+            self.config,
+            f"{runtime_label(self.config)} Predict",
+            total=len(X_test),
+            stats="",
+        )
+        try:
+            for sample in X_test:
+                series = sample[:, target_index].astype(float)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        result = SARIMAX(
+                            series,
+                            order=self.order,
+                            seasonal_order=self.seasonal_order,
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        ).fit(disp=False)
+                    forecast = np.asarray(result.forecast(steps=horizon), dtype=float)
+                except Exception:
+                    forecast = np.repeat(series[-1], horizon).astype(float)
+                predictions.append(forecast)
+                runtime_update_task(self.config, predict_task_id, advance=1)
+        finally:
+            runtime_remove_task(self.config, predict_task_id)
 
         return np.asarray(predictions, dtype=np.float32)
 

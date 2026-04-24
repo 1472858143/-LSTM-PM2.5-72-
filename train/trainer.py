@@ -5,9 +5,9 @@ from datetime import datetime
 from typing import Any, Iterable
 
 import numpy as np
-from tqdm import tqdm
 
 from utils.config import apply_window_experiment, ensure_project_dirs, normalize_window_selection, resolve_path
+from utils.console_utils import create_progress, get_console, setup_console_encoding
 from utils.data_loader import prepare_window_data
 from utils.env import check_environment
 from utils.metrics import compute_all_metrics
@@ -24,13 +24,25 @@ from utils.output import (
     save_predictions,
     save_training_history,
 )
-from utils.runtime import runtime_label, runtime_write
+from utils.runtime import runtime_label, runtime_remove_task, runtime_update_task, runtime_write
 from utils.seed import set_global_seed
 from visualization.plots import create_model_plots, plot_loss_curve, plot_peak_case
 
 
+MODEL_STAGES = (
+    "Reading data...",
+    "Preprocessing data...",
+    "Building sliding windows...",
+    "Training model...",
+    "Predicting...",
+    "Calculating metrics...",
+    "Saving outputs...",
+    "Finished",
+)
+
+
 def _instantiate_model(model_name: str, config: dict[str, Any]):
-    """根据模型名称延迟导入并实例化模型。"""
+    """Instantiate the selected model lazily."""
     if model_name == "arima":
         from models.arima import ARIMAForecastModel
 
@@ -55,11 +67,11 @@ def _instantiate_model(model_name: str, config: dict[str, Any]):
         from models.attention_lstm import AttentionLSTMForecastModel
 
         return AttentionLSTMForecastModel(config)
-    raise ValueError(f"不支持的模型名称: {model_name}")
+    raise ValueError(f"Unsupported model name: {model_name}")
 
 
 def normalize_model_selection(config: dict[str, Any], models: Iterable[str] | str) -> list[str]:
-    """校验命令行传入的模型名称。"""
+    """Validate model names received from the CLI."""
     allowed = config["models"]["allowed_model_names"]
     if isinstance(models, str):
         if models == "all":
@@ -73,12 +85,12 @@ def normalize_model_selection(config: dict[str, Any], models: Iterable[str] | st
 
     invalid = [model for model in selected if model not in allowed]
     if invalid:
-        raise ValueError(f"模型名称不在允许列表中: {invalid}")
+        raise ValueError(f"Model names are not allowed: {invalid}")
     return selected
 
 
 def _validate_window_data(data: dict[str, Any], config: dict[str, Any]) -> None:
-    """检查窗口数据 shape 是否符合当前窗口实验配置。"""
+    """Validate windowed split shapes for the active experiment."""
     input_window = int(config["window"]["input_window_hours"])
     output_window = int(config["window"]["output_window_hours"])
     feature_count = int(config["global_constraints"]["feature_count"])
@@ -86,22 +98,21 @@ def _validate_window_data(data: dict[str, Any], config: dict[str, Any]) -> None:
         X = data[f"X_{split_name}"]
         y = data[f"y_{split_name}"]
         if X.ndim != 3 or X.shape[1:] != (input_window, feature_count):
-            raise ValueError(f"{split_name} X shape 错误: {X.shape}")
+            raise ValueError(f"{split_name} X shape mismatch: {X.shape}")
         if y.ndim != 2 or y.shape[1] != output_window:
-            raise ValueError(f"{split_name} y shape 错误: {y.shape}")
+            raise ValueError(f"{split_name} y shape mismatch: {y.shape}")
         if len(X) == 0:
-            raise ValueError(f"{split_name} 没有可用滑动窗口样本。")
+            raise ValueError(f"{split_name} has no available sliding-window samples.")
 
 
-def _build_stage_counter(total_steps: int = 8):
-    count = {"value": 0}
+def _enabled_models(window_config: dict[str, Any], models: Iterable[str]) -> list[str]:
+    return [model_name for model_name in models if window_config["models"][model_name].get("enabled", True)]
 
-    def advance(config: dict[str, Any], executed_steps: list[str], message: str) -> None:
-        count["value"] += 1
-        executed_steps.append(message)
-        runtime_write(config, f"{message} Progress: {count['value']}/{total_steps}")
 
-    return advance
+def _advance_stage(config: dict[str, Any], executed_steps: list[str], message: str) -> None:
+    executed_steps.append(message)
+    runtime_write(config, message)
+    runtime_update_task(config, config.get("_runtime", {}).get("step_task_id"), advance=1)
 
 
 def _build_execution_log(
@@ -172,7 +183,8 @@ def run_training_pipeline(
     selected_models: Iterable[str] | str = "all",
     selected_windows: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
-    """统一训练主流程，支持单窗口与多窗口实验。"""
+    """Run the full training pipeline across windows and models."""
+    setup_console_encoding()
     models = normalize_model_selection(config, selected_models)
     windows = normalize_window_selection(config, selected_windows)
     ensure_project_dirs(config)
@@ -185,153 +197,172 @@ def run_training_pipeline(
     stage_summary_rows: list[dict[str, Any]] = []
     horizon_summary_rows: list[dict[str, Any]] = []
 
-    window_bar = tqdm(windows, desc="Window experiments", unit="window", dynamic_ncols=True)
-    for window_index, window_experiment in enumerate(window_bar, start=1):
-        window_config = apply_window_experiment(config, window_experiment)
-        window_name = str(window_experiment["name"])
-        window_bar.set_description(f"Window experiments: {window_index}/{len(windows)} {window_name}")
+    console = get_console()
+    with create_progress(console=console) as progress:
+        window_task_id = progress.add_task("Window Experiments", total=max(len(windows), 1), stats="")
 
-        data = prepare_window_data(window_config)
-        _validate_window_data(data, window_config)
+        for window_experiment in windows:
+            window_config = apply_window_experiment(config, window_experiment)
+            window_name = str(window_experiment["name"])
 
-        results[window_name] = {}
-        model_bar = tqdm(models, desc=f"Models in {window_name}", unit="model", leave=False, dynamic_ncols=True)
-        for model_index, model_name in enumerate(model_bar, start=1):
-            model_bar.set_description(f"Models in {window_name}: {model_index}/{len(models)} {model_name}")
-            model_cfg = window_config["models"][model_name]
-            if not model_cfg.get("enabled", True):
-                continue
+            data = prepare_window_data(window_config)
+            _validate_window_data(data, window_config)
 
-            runtime_config = copy.deepcopy(window_config)
-            runtime_config["_active_model_name"] = model_name
-            runtime_config["_runtime"] = {"writer": tqdm.write}
-            output_dir = prepare_model_output_dir(runtime_config, model_name)
-            executed_steps: list[str] = []
-            advance_step = _build_stage_counter()
-            start_time = datetime.now()
-            history: list[dict[str, Any]] = []
+            results[window_name] = {}
+            enabled_models = _enabled_models(window_config, models)
+            model_task_id = None
+            if enabled_models:
+                model_task_id = progress.add_task(f"[{window_name}] Models", total=len(enabled_models), stats="")
 
-            try:
-                runtime_write(runtime_config, "Start")
-                executed_steps.append("Start")
-                advance_step(runtime_config, executed_steps, "Reading data...")
-                advance_step(runtime_config, executed_steps, "Preprocessing data...")
-                advance_step(runtime_config, executed_steps, "Building sliding windows...")
+            for model_name in enabled_models:
+                model_cfg = window_config["models"][model_name]
+                runtime_config = copy.deepcopy(window_config)
+                runtime_config["_active_model_name"] = model_name
 
-                model = _instantiate_model(model_name, runtime_config)
-
-                advance_step(runtime_config, executed_steps, "Training model...")
-                model.fit(data)
-                history = getattr(model, "training_history", [])
-
-                advance_step(runtime_config, executed_steps, "Predicting...")
-                y_pred_scaled = model.predict(data)
-
-                advance_step(runtime_config, executed_steps, "Calculating metrics...")
-                y_true = data["scaler"].inverse_transform_target(data["y_test"])
-                y_pred = data["scaler"].inverse_transform_target(y_pred_scaled)
-                metrics = compute_all_metrics(y_true, y_pred, runtime_config)
-
-                advance_step(runtime_config, executed_steps, "Saving outputs...")
-                save_predictions(runtime_config, model_name, y_true, y_pred, data["timestamps_test"])
-                save_metrics(runtime_config, model_name, metrics)
-                save_config_snapshot(runtime_config, model_name)
-                save_metrics_tables(runtime_config, model_name, metrics)
-                model.save(output_dir / "model.pt")
-
-                attention_weights = getattr(model, "attention_weights", None)
-                if model_name == "attention_lstm" and attention_weights is not None:
-                    attention_path = resolve_path(model_cfg["attention_weights_path"])
-                    model.save_attention_weights(attention_path)
-                    save_attention_stats(runtime_config, model_name, attention_weights)
-
-                create_model_plots(
-                    y_true,
-                    y_pred,
-                    metrics,
-                    data["timestamps_test"],
-                    output_dir / "plots",
-                    window_name,
-                    model_name,
-                    int(runtime_config["window"]["output_window_hours"]),
-                    attention_weights,
+                step_task_id = progress.add_task(
+                    f"{runtime_label(runtime_config)} Steps",
+                    total=len(MODEL_STAGES),
+                    stats="",
                 )
+                runtime_config["_runtime"] = {
+                    "console": console,
+                    "progress": progress,
+                    "window_task_id": window_task_id,
+                    "model_task_id": model_task_id,
+                    "step_task_id": step_task_id,
+                }
 
-                if model_name in deep_models:
-                    save_training_history(runtime_config, model_name, history)
-                    if history:
-                        plot_loss_curve(history, output_dir / "plots")
+                output_dir = prepare_model_output_dir(runtime_config, model_name)
+                executed_steps: list[str] = []
+                start_time = datetime.now()
+                history: list[dict[str, Any]] = []
 
-                peak_summary = save_peak_analysis(runtime_config, model_name, y_true, y_pred, data["timestamps_test"])
-                if peak_summary["selected_sample_ids"]:
-                    plot_peak_case(
+                try:
+                    runtime_write(runtime_config, "Start")
+                    executed_steps.append("Start")
+
+                    for message in MODEL_STAGES[:3]:
+                        _advance_stage(runtime_config, executed_steps, message)
+
+                    model = _instantiate_model(model_name, runtime_config)
+
+                    _advance_stage(runtime_config, executed_steps, MODEL_STAGES[3])
+                    model.fit(data)
+                    history = getattr(model, "training_history", [])
+
+                    _advance_stage(runtime_config, executed_steps, MODEL_STAGES[4])
+                    y_pred_scaled = model.predict(data)
+
+                    _advance_stage(runtime_config, executed_steps, MODEL_STAGES[5])
+                    y_true = data["scaler"].inverse_transform_target(data["y_test"])
+                    y_pred = data["scaler"].inverse_transform_target(y_pred_scaled)
+                    metrics = compute_all_metrics(y_true, y_pred, runtime_config)
+
+                    _advance_stage(runtime_config, executed_steps, MODEL_STAGES[6])
+                    save_predictions(runtime_config, model_name, y_true, y_pred, data["timestamps_test"])
+                    save_metrics(runtime_config, model_name, metrics)
+                    save_config_snapshot(runtime_config, model_name)
+                    save_metrics_tables(runtime_config, model_name, metrics)
+                    model.save(output_dir / "model.pt")
+
+                    attention_weights = getattr(model, "attention_weights", None)
+                    if model_name == "attention_lstm" and attention_weights is not None:
+                        attention_path = resolve_path(model_cfg["attention_weights_path"])
+                        model.save_attention_weights(attention_path)
+                        save_attention_stats(runtime_config, model_name, attention_weights)
+
+                    create_model_plots(
                         y_true,
                         y_pred,
+                        metrics,
                         data["timestamps_test"],
-                        peak_summary["selected_sample_ids"][0],
                         output_dir / "plots",
                         window_name,
                         model_name,
                         int(runtime_config["window"]["output_window_hours"]),
+                        attention_weights,
                     )
 
-                copy_metrics_to_summary(runtime_config, model_name)
-                _append_summary_rows(
-                    runtime_config,
-                    model_name,
-                    metrics,
-                    window_summary_rows,
-                    stage_summary_rows,
-                    horizon_summary_rows,
-                )
+                    if model_name in deep_models:
+                        save_training_history(runtime_config, model_name, history)
+                        if history:
+                            plot_loss_curve(history, output_dir / "plots")
 
-                end_time = datetime.now()
-                save_execution_log(
-                    runtime_config,
-                    model_name,
-                    _build_execution_log(
+                    peak_summary = save_peak_analysis(runtime_config, model_name, y_true, y_pred, data["timestamps_test"])
+                    if peak_summary["selected_sample_ids"]:
+                        plot_peak_case(
+                            y_true,
+                            y_pred,
+                            data["timestamps_test"],
+                            peak_summary["selected_sample_ids"][0],
+                            output_dir / "plots",
+                            window_name,
+                            model_name,
+                            int(runtime_config["window"]["output_window_hours"]),
+                        )
+
+                    copy_metrics_to_summary(runtime_config, model_name)
+                    _append_summary_rows(
                         runtime_config,
                         model_name,
-                        executed_steps + ["Finished"],
-                        start_time,
-                        end_time,
-                        "success",
-                    ),
-                    history,
-                )
-                runtime_write(runtime_config, "Finished Progress: 8/8")
+                        metrics,
+                        window_summary_rows,
+                        stage_summary_rows,
+                        horizon_summary_rows,
+                    )
 
-                results[window_name][model_name] = {
-                    "output_dir": str(output_dir),
-                    "predictions_shape": list(np.asarray(y_pred).shape),
-                    "overall_metrics": metrics["overall"],
-                    "status": "success",
-                }
-            except Exception as exc:
-                end_time = datetime.now()
-                save_execution_log(
-                    runtime_config,
-                    model_name,
-                    _build_execution_log(
+                    _advance_stage(runtime_config, executed_steps, MODEL_STAGES[7])
+                    end_time = datetime.now()
+                    save_execution_log(
                         runtime_config,
                         model_name,
-                        executed_steps,
-                        start_time,
-                        end_time,
-                        "failed",
-                        str(exc),
-                    ),
-                    history,
-                )
-                runtime_write(runtime_config, f"Failed: {exc}")
-                results[window_name][model_name] = {
-                    "output_dir": str(output_dir),
-                    "status": "failed",
-                    "error_message": str(exc),
-                }
+                        _build_execution_log(
+                            runtime_config,
+                            model_name,
+                            executed_steps,
+                            start_time,
+                            end_time,
+                            "success",
+                        ),
+                        history,
+                    )
 
-        model_bar.close()
+                    results[window_name][model_name] = {
+                        "output_dir": str(output_dir),
+                        "predictions_shape": list(np.asarray(y_pred).shape),
+                        "overall_metrics": metrics["overall"],
+                        "status": "success",
+                    }
+                except Exception as exc:
+                    end_time = datetime.now()
+                    save_execution_log(
+                        runtime_config,
+                        model_name,
+                        _build_execution_log(
+                            runtime_config,
+                            model_name,
+                            executed_steps,
+                            start_time,
+                            end_time,
+                            "failed",
+                            str(exc),
+                        ),
+                        history,
+                    )
+                    runtime_write(runtime_config, f"Failed: {exc}", message_style="bold red")
+                    results[window_name][model_name] = {
+                        "output_dir": str(output_dir),
+                        "status": "failed",
+                        "error_message": str(exc),
+                    }
+                finally:
+                    if model_task_id is not None:
+                        progress.advance(model_task_id, 1)
+                    runtime_remove_task(runtime_config, step_task_id)
+
+            if model_task_id is not None:
+                progress.remove_task(model_task_id)
+            progress.advance(window_task_id, 1)
 
     save_metrics_summary_tables(config, window_summary_rows, stage_summary_rows, horizon_summary_rows)
-    window_bar.close()
     return results

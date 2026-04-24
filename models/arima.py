@@ -7,14 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from tqdm import tqdm
 
 from models.base import BaseForecastModel
-from utils.runtime import runtime_label, runtime_write
+from utils.runtime import runtime_add_task, runtime_label, runtime_remove_task, runtime_update_task, runtime_write
 
 
 class ARIMAForecastModel(BaseForecastModel):
-    """ARIMA 单变量基线模型。"""
+    """ARIMA single-variable baseline model."""
 
     name = "arima"
 
@@ -35,26 +34,47 @@ class ARIMAForecastModel(BaseForecastModel):
         best_score = np.inf
         best_order: tuple[int, int, int] | None = None
         criterion = self.model_config.get("selection_criterion", "aic").lower()
-        orders = [order for order in itertools.product(
-            self.model_config["p_values"],
-            self.model_config["d_values"],
-            self.model_config["q_values"],
-        ) if order != (0, 0, 0)]
+        orders = [
+            order
+            for order in itertools.product(
+                self.model_config["p_values"],
+                self.model_config["d_values"],
+                self.model_config["q_values"],
+            )
+            if order != (0, 0, 0)
+        ]
 
-        progress = tqdm(orders, desc=f"{runtime_label(self.config)} ARIMA search", leave=False, dynamic_ncols=True)
-        for order in progress:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    result = ARIMA(train_series, order=order).fit()
-                score = float(getattr(result, criterion))
-                progress.set_postfix({"best": best_score if np.isfinite(best_score) else None, "order": order})
-                if score < best_score:
-                    best_score = score
-                    best_order = tuple(int(v) for v in order)
-            except Exception:
-                continue
-        progress.close()
+        search_task_id = runtime_add_task(
+            self.config,
+            f"{runtime_label(self.config)} Search",
+            total=len(orders),
+            stats="best=- order=-",
+        )
+        try:
+            for order in orders:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        result = ARIMA(train_series, order=order).fit()
+                    score = float(getattr(result, criterion))
+                    if score < best_score:
+                        best_score = score
+                        best_order = tuple(int(v) for v in order)
+                except Exception:
+                    pass
+
+                runtime_update_task(
+                    self.config,
+                    search_task_id,
+                    advance=1,
+                    stats=(
+                        f"best={best_score:.6f} order={best_order or order}"
+                        if np.isfinite(best_score)
+                        else f"best=- order={order}"
+                    ),
+                )
+        finally:
+            runtime_remove_task(self.config, search_task_id)
 
         if best_order is None:
             best_order = (1, 0, 0)
@@ -66,7 +86,7 @@ class ARIMAForecastModel(BaseForecastModel):
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
         if self.order is None:
-            raise RuntimeError("ARIMA 尚未 fit。")
+            raise RuntimeError("ARIMA has not been fit yet.")
 
         from statsmodels.tsa.arima.model import ARIMA
 
@@ -76,18 +96,26 @@ class ARIMAForecastModel(BaseForecastModel):
         horizon = int(self.model_config["forecast_horizon"])
         predictions: list[np.ndarray] = []
 
-        progress = tqdm(X_test, desc=f"{runtime_label(self.config)} ARIMA predict", leave=False, dynamic_ncols=True)
-        for sample in progress:
-            series = sample[:, target_index].astype(float)
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    result = ARIMA(series, order=self.order).fit()
-                forecast = np.asarray(result.forecast(steps=horizon), dtype=float)
-            except Exception:
-                forecast = np.repeat(series[-1], horizon).astype(float)
-            predictions.append(forecast)
-        progress.close()
+        predict_task_id = runtime_add_task(
+            self.config,
+            f"{runtime_label(self.config)} Predict",
+            total=len(X_test),
+            stats="",
+        )
+        try:
+            for sample in X_test:
+                series = sample[:, target_index].astype(float)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        result = ARIMA(series, order=self.order).fit()
+                    forecast = np.asarray(result.forecast(steps=horizon), dtype=float)
+                except Exception:
+                    forecast = np.repeat(series[-1], horizon).astype(float)
+                predictions.append(forecast)
+                runtime_update_task(self.config, predict_task_id, advance=1)
+        finally:
+            runtime_remove_task(self.config, predict_task_id)
 
         return np.asarray(predictions, dtype=np.float32)
 
