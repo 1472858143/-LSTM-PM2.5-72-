@@ -22,6 +22,7 @@ class XGBoostForecastModel(BaseForecastModel):
         self.model: Any = None
 
     def fit(self, data: dict[str, Any]) -> None:
+        print("XGBOOST START")
         from sklearn.multioutput import MultiOutputRegressor
         from xgboost import XGBRegressor
 
@@ -48,6 +49,7 @@ class XGBoostForecastModel(BaseForecastModel):
         self.model.fit(X_train, data["y_train"])
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
+        print("XGBOOST PREDICT START")
         if self.model is None:
             raise RuntimeError("XGBoost 尚未 fit。")
         X_test = data["X_test"].reshape(data["X_test"].shape[0], -1)

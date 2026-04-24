@@ -22,6 +22,7 @@ class RandomForestForecastModel(BaseForecastModel):
         self.model: Any = None
 
     def fit(self, data: dict[str, Any]) -> None:
+        print("RANDON_FOREST START")
         from sklearn.ensemble import RandomForestRegressor
 
         params = {
@@ -43,6 +44,7 @@ class RandomForestForecastModel(BaseForecastModel):
         self.model.fit(X_train, data["y_train"])
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
+        print("RANDON_FOREST PREDICT START")
         if self.model is None:
             raise RuntimeError("Random Forest 尚未 fit。")
         X_test = data["X_test"].reshape(data["X_test"].shape[0], -1)

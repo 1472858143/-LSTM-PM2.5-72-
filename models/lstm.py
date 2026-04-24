@@ -8,13 +8,19 @@ import numpy as np
 from models.base import BaseForecastModel
 
 
-class LSTMForecastModel(BaseForecastModel):
-    """基础 LSTM 多变量序列模型。
+def weighted_mse_loss(y_pred: Any, y_true: Any, q75: float, q90: float):
+    """Apply weighted MSE on multi-step targets with shape (B, 72)."""
+    import torch
 
-    相比只使用最后隐藏状态的最简版本，这里保留 LSTM 主体不变，只在输出头上
-    增加一个轻量序列表达汇聚：将最后隐藏状态与时间维最大池化结果拼接，
-    以减轻长窗口信息压缩过强带来的振幅压缩问题。
-    """
+    weights = torch.ones_like(y_true)
+    weights = torch.where(y_true >= q75, torch.full_like(y_true, 3.0), weights)
+    weights = torch.where(y_true >= q90, torch.full_like(y_true, 8.0), weights)
+    loss = torch.mean(weights * torch.square(y_pred - y_true))
+    return loss, weights
+
+
+class LSTMForecastModel(BaseForecastModel):
+    """LSTM forecaster with the existing direct 72-step output head."""
 
     name = "lstm"
 
@@ -23,6 +29,7 @@ class LSTMForecastModel(BaseForecastModel):
         self.network: Any = None
         self.device: Any = None
         self.training_history: list[dict[str, float | int]] = []
+        self.weighted_loss_thresholds: dict[str, float] | None = None
         self.high_value_thresholds: dict[str, float] | None = None
 
     def _build_network(self) -> Any:
@@ -30,8 +37,6 @@ class LSTMForecastModel(BaseForecastModel):
         from torch import nn
 
         class LSTMRegressor(nn.Module):
-            """PyTorch LSTM 回归网络，输出维度固定为 72。"""
-
             def __init__(self, input_size: int, hidden_size: int, num_layers: int, dropout: float, output_size: int):
                 super().__init__()
                 lstm_dropout = dropout if num_layers > 1 else 0.0
@@ -50,13 +55,10 @@ class LSTMForecastModel(BaseForecastModel):
                 )
 
             def forward(self, x):
-                # outputs 保留 168 个历史时间步的表示，hidden[-1] 是最后时间步摘要。
                 outputs, (hidden, _) = self.lstm(x)
                 last_hidden = hidden[-1]
-                # 时间维最大池化能够更容易保留历史强响应，对峰值低估更友好。
                 max_pool = outputs.max(dim=1).values
                 features = torch.cat([last_hidden, max_pool], dim=1)
-                # 输出层仍然直接给出未来 72 小时预测，不改变任务定义。
                 return self.head(features)
 
         return LSTMRegressor(
@@ -71,14 +73,15 @@ class LSTMForecastModel(BaseForecastModel):
         import torch
         from torch.utils.data import DataLoader, TensorDataset
 
-        # 项目书要求深度学习模型使用 GPU，避免不同设备导致实验条件不一致。
         if not torch.cuda.is_available():
             raise RuntimeError("LSTM 训练要求 CUDA GPU，但当前 CUDA 不可用。")
 
         self.device = torch.device("cuda")
         self.network = self._build_network().to(self.device)
-        criterion = self._build_loss()
-        self.high_value_thresholds = self._prepare_high_value_thresholds(data)
+        self.training_history = []
+        self.weighted_loss_thresholds = self._prepare_weighted_loss_thresholds(data)
+        self.high_value_thresholds = self.weighted_loss_thresholds
+        print(f"LSTM weighted loss thresholds: q75={self.weighted_loss_thresholds['q75']:.6f}, q90={self.weighted_loss_thresholds['q90']:.6f}")
         optimizer = torch.optim.Adam(self.network.parameters(), lr=float(self.model_config["learning_rate"]))
 
         X_train = torch.tensor(data["X_train"], dtype=torch.float32)
@@ -105,113 +108,116 @@ class LSTMForecastModel(BaseForecastModel):
         for _ in range(int(self.model_config["epochs"])):
             self.network.train()
             train_losses: list[float] = []
+            train_mean_weights: list[float] = []
+            train_peak_ratios: list[float] = []
+
             for batch_X, batch_y in train_loader:
                 batch_X = batch_X.to(self.device)
                 batch_y = batch_y.to(self.device)
                 optimizer.zero_grad()
                 predictions = self.network(batch_X)
-                loss = self._compute_loss(predictions, batch_y, criterion)
+                loss, weight_stats = self._compute_loss(predictions, batch_y)
                 loss.backward()
                 optimizer.step()
-                train_losses.append(float(loss.item()))
 
-            # 验证集只用于 early stopping，不参与参数更新。
-            val_loss = self._evaluate_loss(val_loader, criterion)
+                train_losses.append(float(loss.item()))
+                train_mean_weights.append(weight_stats["mean_weight"])
+                train_peak_ratios.append(weight_stats["peak_ratio"])
+
+            val_loss, val_mean_weight, val_peak_ratio = self._evaluate_loss(val_loader)
             epoch = len(self.training_history) + 1
+            history_row = {
+                "epoch": epoch,
+                "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
+                "validation_loss": float(val_loss),
+                "best_validation_loss": float(min(best_val_loss, val_loss)),
+                "bad_epochs": bad_epochs,
+                "q75": float(self.weighted_loss_thresholds["q75"]),
+                "q90": float(self.weighted_loss_thresholds["q90"]),
+                "train_mean_weight": float(np.mean(train_mean_weights)) if train_mean_weights else float("nan"),
+                "validation_mean_weight": float(val_mean_weight),
+                "train_peak_ratio": float(np.mean(train_peak_ratios)) if train_peak_ratios else float("nan"),
+                "validation_peak_ratio": float(val_peak_ratio),
+            }
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                history_row["best_validation_loss"] = float(best_val_loss)
                 best_state = {k: v.detach().cpu().clone() for k, v in self.network.state_dict().items()}
                 bad_epochs = 0
+                history_row["bad_epochs"] = bad_epochs
             else:
                 bad_epochs += 1
-                if bad_epochs >= patience:
-                    self.training_history.append(
-                        {
-                            "epoch": epoch,
-                            "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
-                            "validation_loss": float(val_loss),
-                            "best_validation_loss": float(best_val_loss),
-                            "bad_epochs": bad_epochs,
-                        }
-                    )
-                    break
+                history_row["bad_epochs"] = bad_epochs
 
-            self.training_history.append(
-                {
-                    "epoch": epoch,
-                    "train_loss": float(np.mean(train_losses)) if train_losses else float("nan"),
-                    "validation_loss": float(val_loss),
-                    "best_validation_loss": float(best_val_loss),
-                    "bad_epochs": bad_epochs,
-                }
-            )
+            self.training_history.append(history_row)
+            if bad_epochs >= patience:
+                break
 
         if best_state is not None:
             self.network.load_state_dict(best_state)
 
-    def _build_loss(self) -> Any:
-        """构造逐元素 Huber/SmoothL1 损失。"""
-        from torch import nn
-
-        loss_name = str(self.model_config.get("loss", "HuberLoss")).lower()
-        delta = float(self.model_config.get("huber_delta", 1.0))
-        if loss_name == "smoothl1loss":
-            return nn.SmoothL1Loss(reduction="none")
-        try:
-            return nn.HuberLoss(delta=delta, reduction="none")
-        except AttributeError:
-            return nn.SmoothL1Loss(reduction="none")
-        except TypeError:
-            return nn.SmoothL1Loss(reduction="none")
-
-    def _prepare_high_value_thresholds(self, data: dict[str, Any]) -> dict[str, float] | None:
-        """基于训练集标签分位数构造高值样本阈值。"""
-        weighting_cfg = self.model_config.get("high_value_weighting", {})
-        if not weighting_cfg.get("enabled", False):
-            return None
-        mid_quantile = float(weighting_cfg.get("mid_quantile", 0.75))
-        high_quantile = float(weighting_cfg.get("high_quantile", 0.9))
-        y_train = data["y_train"]
+    def _prepare_weighted_loss_thresholds(self, data: dict[str, Any]) -> dict[str, float]:
+        """Estimate q75/q90 from raw training PM2.5 only, without leakage."""
+        target_column = data["target_column"]
+        train_target = np.asarray(data["splits_raw"]["train"][target_column], dtype=float)
+        scaler = data["scaler"]
         return {
-            "mid": float(np.nanquantile(y_train, mid_quantile)),
-            "high": float(np.nanquantile(y_train, high_quantile)),
+            "q75": float(np.nanquantile(train_target, 0.75)),
+            "q90": float(np.nanquantile(train_target, 0.90)),
+            "target_min": float(scaler.data_min_[target_column]),
+            "target_max": float(scaler.data_max_[target_column]),
         }
 
-    def _compute_loss(self, predictions: Any, targets: Any, criterion: Any) -> Any:
-        """在基础回归损失上对高值 PM2.5 区间增加权重。"""
-        raw_loss = criterion(predictions, targets)
-        weighting_cfg = self.model_config.get("high_value_weighting", {})
-        if self.high_value_thresholds is None or not weighting_cfg.get("enabled", False):
-            return raw_loss.mean()
-
-        import torch
-
-        mid_weight = float(weighting_cfg.get("mid_weight", 2.0))
-        high_weight = float(weighting_cfg.get("high_weight", 3.0))
-        weights = torch.ones_like(targets)
-        weights = torch.where(
-            targets > float(self.high_value_thresholds["mid"]),
-            torch.full_like(targets, mid_weight),
-            weights,
+    def _inverse_transform_target_tensor(self, values: Any) -> Any:
+        if self.weighted_loss_thresholds is None:
+            raise RuntimeError("加权 MSE 阈值尚未初始化。")
+        target_min = float(self.weighted_loss_thresholds["target_min"])
+        target_range = max(
+            float(self.weighted_loss_thresholds["target_max"]) - target_min,
+            1e-12,
         )
-        weights = torch.where(
-            targets > float(self.high_value_thresholds["high"]),
-            torch.full_like(targets, high_weight),
-            weights,
-        )
-        return (raw_loss * weights).sum() / torch.clamp(weights.sum(), min=1e-6)
+        return values * target_range + target_min
 
-    def _evaluate_loss(self, loader: Any, criterion: Any) -> float:
+    def _compute_loss(self, predictions: Any, targets: Any) -> tuple[Any, dict[str, float]]:
+        if self.weighted_loss_thresholds is None:
+            raise RuntimeError("加权 MSE 阈值尚未初始化。")
+
+        predictions_raw = self._inverse_transform_target_tensor(predictions)
+        targets_raw = self._inverse_transform_target_tensor(targets)
+        loss, weights = weighted_mse_loss(
+            predictions_raw,
+            targets_raw,
+            float(self.weighted_loss_thresholds["q75"]),
+            float(self.weighted_loss_thresholds["q90"]),
+        )
+        peak_ratio = (weights == 8.0).to(dtype=predictions_raw.dtype).mean()
+        return loss, {
+            "mean_weight": float(weights.mean().item()),
+            "peak_ratio": float(peak_ratio.item()),
+        }
+
+    def _evaluate_loss(self, loader: Any) -> tuple[float, float, float]:
         import torch
 
         self.network.eval()
         losses: list[float] = []
+        mean_weights: list[float] = []
+        peak_ratios: list[float] = []
         with torch.no_grad():
             for batch_X, batch_y in loader:
                 batch_X = batch_X.to(self.device)
                 batch_y = batch_y.to(self.device)
-                losses.append(float(self._compute_loss(self.network(batch_X), batch_y, criterion).item()))
-        return float(np.mean(losses)) if losses else float("inf")
+                predictions = self.network(batch_X)
+                loss, weight_stats = self._compute_loss(predictions, batch_y)
+                losses.append(float(loss.item()))
+                mean_weights.append(weight_stats["mean_weight"])
+                peak_ratios.append(weight_stats["peak_ratio"])
+        return (
+            float(np.mean(losses)) if losses else float("inf"),
+            float(np.mean(mean_weights)) if mean_weights else float("nan"),
+            float(np.mean(peak_ratios)) if peak_ratios else float("nan"),
+        )
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
         import torch
@@ -227,7 +233,6 @@ class LSTMForecastModel(BaseForecastModel):
             shuffle=False,
         )
         predictions: list[np.ndarray] = []
-        # 测试阶段不计算梯度，只生成统一的 (N, 72) 预测数组。
         with torch.no_grad():
             for (batch_X,) in loader:
                 batch_pred = self.network(batch_X.to(self.device)).detach().cpu().numpy()
@@ -239,7 +244,6 @@ class LSTMForecastModel(BaseForecastModel):
 
         if self.network is None:
             raise RuntimeError("LSTM 尚未 fit，无法保存。")
-        # 保存 state_dict 和关键结构参数，便于后续复现实验或加载推理。
         torch.save(
             {
                 "model_name": self.name,
@@ -248,6 +252,7 @@ class LSTMForecastModel(BaseForecastModel):
                 "feature_count": self.config["global_constraints"]["feature_count"],
                 "output_window": self.config["global_constraints"]["output_window_hours"],
                 "training_history": self.training_history,
+                "weighted_loss_thresholds": self.weighted_loss_thresholds,
                 "high_value_thresholds": self.high_value_thresholds,
             },
             Path(path),

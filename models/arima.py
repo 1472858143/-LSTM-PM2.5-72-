@@ -26,6 +26,7 @@ class ARIMAForecastModel(BaseForecastModel):
         self.selection_score: float | None = None
 
     def fit(self, data: dict[str, Any]) -> None:
+        print("ARIMA START")
         from statsmodels.tsa.arima.model import ARIMA
 
         # 选阶只使用训练集中的 pm2_5，避免验证集和测试集信息参与调参。
@@ -65,6 +66,7 @@ class ARIMAForecastModel(BaseForecastModel):
         self.selection_score = best_score
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
+        print("ARIMA PREDICT START")
         if self.order is None:
             raise RuntimeError("ARIMA 尚未 fit。")
 

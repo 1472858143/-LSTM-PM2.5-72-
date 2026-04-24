@@ -27,6 +27,7 @@ class SARIMAForecastModel(BaseForecastModel):
         self.selection_score: float | None = None
 
     def fit(self, data: dict[str, Any]) -> None:
+        print("SARIMA START")
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
         # 只在训练集上做阶数搜索，保持测试集独立。
@@ -88,6 +89,7 @@ class SARIMAForecastModel(BaseForecastModel):
         self.selection_score = best_score
 
     def predict(self, data: dict[str, Any]) -> np.ndarray:
+        print("SARIMA PREDICT START")
         if self.order is None or self.seasonal_order is None:
             raise RuntimeError("SARIMA 尚未 fit。")
 
