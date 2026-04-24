@@ -12,47 +12,47 @@
   "target_column": "pm2_5",
   "splits": {
     "train": {
-      "created": 14258,
-      "skipped_nan": 1747,
+      "created": 13923,
+      "skipped_nan": 0,
       "skipped_non_hourly": 0,
-      "rows": 16244,
+      "rows": 14162,
       "X_shape": [
-        14258,
+        13923,
         168,
         6
       ],
       "y_shape": [
-        14258,
+        13923,
         72
       ]
     },
     "validation": {
-      "created": 2541,
-      "skipped_nan": 700,
+      "created": 2795,
+      "skipped_nan": 0,
       "skipped_non_hourly": 0,
-      "rows": 3480,
+      "rows": 3034,
       "X_shape": [
-        2541,
+        2795,
         168,
         6
       ],
       "y_shape": [
-        2541,
+        2795,
         72
       ]
     },
     "test": {
-      "created": 2736,
-      "skipped_nan": 507,
+      "created": 2797,
+      "skipped_nan": 0,
       "skipped_non_hourly": 0,
-      "rows": 3482,
+      "rows": 3036,
       "X_shape": [
-        2736,
+        2797,
         168,
         6
       ],
       "y_shape": [
-        2736,
+        2797,
         72
       ]
     }

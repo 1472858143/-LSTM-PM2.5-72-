@@ -23,9 +23,10 @@ class AttentionLSTMForecastModel(BaseForecastModel):
         self.device: Any = None
         self.attention_weights: np.ndarray | None = None
         self.training_history: list[dict[str, float | int]] = []
-        self.high_value_threshold: float | None = None
+        self.high_value_threshold: dict[str, float] | None = None
 
     def _build_network(self) -> Any:
+        import torch
         from torch import nn
 
         class AttentionLSTMRegressor(nn.Module):
@@ -41,19 +42,33 @@ class AttentionLSTMForecastModel(BaseForecastModel):
                     dropout=lstm_dropout,
                     batch_first=True,
                 )
-                self.attention = nn.Linear(hidden_size, 1)
-                self.fc = nn.Linear(hidden_size, output_size)
+                # 使用 query-based additive attention：
+                # key 来自每个历史时间步 hidden state，query 来自最后隐藏状态，
+                # 比“只看 hidden_t 本身”的线性打分更容易拉开时间步差异。
+                self.key_proj = nn.Linear(hidden_size, hidden_size)
+                self.query_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+                self.attention_score = nn.Linear(hidden_size, 1, bias=False)
+                self.head = nn.Sequential(
+                    nn.Linear(hidden_size * 2, hidden_size),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_size, output_size),
+                )
 
             def forward(self, x):
                 # outputs shape: (batch, 168, hidden)，保留每个历史小时的隐藏表示。
-                outputs, _ = self.lstm(x)
+                outputs, (hidden, _) = self.lstm(x)
+                last_hidden = hidden[-1]
+                # softmax 明确沿时间维 dim=1 归一化，保证 168 个历史时间步权重和为 1。
+                query = self.query_proj(last_hidden).unsqueeze(1)
                 # attention 输出每个历史时间步的重要性分数，再通过 softmax 归一化为权重。
-                scores = self.attention(outputs).squeeze(-1)
+                scores = self.attention_score(torch.tanh(self.key_proj(outputs) + query)).squeeze(-1)
                 weights = scores.softmax(dim=1)
-                # 加权求和得到上下文向量，突出对未来 72 小时预测更重要的历史片段。
+                # 权重直接参与 context 计算，整个注意力路径会参与反向传播。
                 context = (outputs * weights.unsqueeze(-1)).sum(dim=1)
+                combined = torch.cat([context, last_hidden], dim=1)
                 # 输出层固定为 72 维，保持直接多输出预测策略。
-                predictions = self.fc(context)
+                predictions = self.head(combined)
                 return predictions, weights
 
         return AttentionLSTMRegressor(
@@ -164,7 +179,7 @@ class AttentionLSTMForecastModel(BaseForecastModel):
         except TypeError:
             return nn.SmoothL1Loss(reduction="none")
 
-    def _prepare_high_value_threshold(self, data: dict[str, Any]) -> float | None:
+    def _prepare_high_value_threshold(self, data: dict[str, Any]) -> dict[str, float] | None:
         """用训练集标签分位数确定高值样本阈值。
 
         阈值来自训练集 y_train，不使用验证/测试标签统计量，避免信息泄露。
@@ -172,8 +187,13 @@ class AttentionLSTMForecastModel(BaseForecastModel):
         weighting_cfg = self.model_config.get("high_value_weighting", {})
         if not weighting_cfg.get("enabled", False):
             return None
-        quantile = float(weighting_cfg.get("quantile", 0.75))
-        return float(np.nanquantile(data["y_train"], quantile))
+        mid_quantile = float(weighting_cfg.get("mid_quantile", 0.75))
+        high_quantile = float(weighting_cfg.get("high_quantile", 0.9))
+        y_train = data["y_train"]
+        return {
+            "mid": float(np.nanquantile(y_train, mid_quantile)),
+            "high": float(np.nanquantile(y_train, high_quantile)),
+        }
 
     def _compute_loss(self, predictions: Any, targets: Any, criterion: Any) -> Any:
         """计算带高值权重的训练损失。
@@ -188,10 +208,19 @@ class AttentionLSTMForecastModel(BaseForecastModel):
 
         import torch
 
-        max_weight = float(weighting_cfg.get("max_weight", 3.0))
-        denominator = max(1.0 - float(self.high_value_threshold), 1e-6)
-        high_ratio = torch.clamp((targets - float(self.high_value_threshold)) / denominator, min=0.0, max=1.0)
-        weights = 1.0 + (max_weight - 1.0) * high_ratio
+        mid_weight = float(weighting_cfg.get("mid_weight", 2.0))
+        high_weight = float(weighting_cfg.get("high_weight", 3.0))
+        weights = torch.ones_like(targets)
+        weights = torch.where(
+            targets > float(self.high_value_threshold["mid"]),
+            torch.full_like(targets, mid_weight),
+            weights,
+        )
+        weights = torch.where(
+            targets > float(self.high_value_threshold["high"]),
+            torch.full_like(targets, high_weight),
+            weights,
+        )
         return (raw_loss * weights).sum() / torch.clamp(weights.sum(), min=1e-6)
 
     def _evaluate_loss(self, loader: Any, criterion: Any) -> float:

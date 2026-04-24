@@ -96,10 +96,23 @@ def save_metrics_tables(config: dict[str, Any], model_name: str, metrics: dict[s
 
 
 def save_training_history(config: dict[str, Any], model_name: str, history: list[dict[str, Any]]) -> None:
-    """保存训练和验证损失曲线数据。"""
+    """保存训练和验证损失曲线数据。
+
+    training_log.json 提供摘要信息，training_history.csv 便于后续直接画图或写论文。
+    """
     if not history:
         return
     output_dir = prepare_model_output_dir(config, model_name)
+    best_row = min(history, key=lambda row: float(row["validation_loss"]))
+    training_log = {
+        "best_epoch": int(best_row["epoch"]),
+        "best_validation_loss": float(best_row["validation_loss"]),
+        "early_stopping_epoch": int(history[-1]["epoch"]),
+        "epochs_completed": int(len(history)),
+        "history": history,
+    }
+    with (output_dir / "training_log.json").open("w", encoding="utf-8") as f:
+        json.dump(training_log, f, ensure_ascii=False, indent=2)
     with (output_dir / "training_history.json").open("w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
     pd.DataFrame(history).to_csv(output_dir / "training_history.csv", index=False, encoding="utf-8")
@@ -110,21 +123,28 @@ def save_attention_stats(config: dict[str, Any], model_name: str, attention_weig
     output_dir = prepare_model_output_dir(config, model_name)
     weights = np.asarray(attention_weights, dtype=float)
     entropy = -(weights * np.log(np.clip(weights, 1e-12, None))).sum(axis=1)
+    sorted_weights = np.sort(weights, axis=1)[:, ::-1]
     uniform_entropy = float(np.log(weights.shape[1]))
     mean_weights = weights.mean(axis=0)
     top_indices = np.argsort(mean_weights)[-5:][::-1]
     stats = {
         "shape": list(weights.shape),
+        "uniform_weight": float(1.0 / weights.shape[1]),
         "mean": float(weights.mean()),
         "std": float(weights.std()),
         "min": float(weights.min()),
         "max": float(weights.max()),
+        "top_1_weight": float(sorted_weights[:, 0].mean()),
+        "top_5_weight_sum": float(sorted_weights[:, :5].sum(axis=1).mean()),
+        "top_10_weight_sum": float(sorted_weights[:, :10].sum(axis=1).mean()),
         "max_per_sample_mean": float(weights.max(axis=1).mean()),
         "max_per_sample_p95": float(np.percentile(weights.max(axis=1), 95)),
         "entropy_mean": float(entropy.mean()),
+        "entropy_std": float(entropy.std()),
         "uniform_entropy": uniform_entropy,
         "entropy_ratio_to_uniform": float(entropy.mean() / uniform_entropy),
-        "near_uniform": bool(entropy.mean() / uniform_entropy > 0.95),
+        # 这里故意把阈值收紧到 0.999，用于捕捉“几乎完全均匀”的退化注意力。
+        "near_uniform": bool(entropy.mean() / uniform_entropy > 0.999),
         "top_mean_weight_steps": [
             {"input_step": int(index + 1), "mean_weight": float(mean_weights[index])}
             for index in top_indices

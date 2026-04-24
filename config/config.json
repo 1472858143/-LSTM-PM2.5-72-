@@ -1,9 +1,9 @@
 {
   "config_version": "2.0",
   "project": {
-    "name": "基于 Attention-LSTM 的北京市 PM2.5 浓度 72 小时多步预测系统",
+    "name": "Attention-LSTM PM2.5 72h Forecasting System",
     "task_type": "pm25_72h_multi_step_forecasting",
-    "description": "统一管理数据、窗口、模型、评估、输出路径和运行环境配置。"
+    "description": "Unified configuration for data, windows, models, evaluation, outputs, and runtime settings."
   },
   "environment": {
     "python_version": "3.10+",
@@ -38,7 +38,7 @@
     "all_paths_from_config": true
   },
   "paths": {
-    "raw_input_csv": "data/Beijing_dataset_selected.csv",
+    "raw_input_csv": "data/data_open_meteo/processed_beijing.csv",
     "canonical_csv": "processed/pm25_hourly_canonical.csv",
     "processed_dir": "processed",
     "windows_npz": "processed/windows.npz",
@@ -74,7 +74,6 @@
       "pm2.5": "pm2_5",
       "pm_2.5": "pm2_5",
       "pm2_5": "pm2_5",
-      "PM2.5": "pm2_5",
       "temp": "temperature_2m",
       "temperature": "temperature_2m",
       "temperature_2m": "temperature_2m",
@@ -233,22 +232,6 @@
       "framework": "pytorch",
       "hidden_size": 128,
       "num_layers": 2,
-      "dropout": 0.2,
-      "batch_size": 64,
-      "learning_rate": 0.001,
-      "epochs": 50,
-      "early_stopping_patience": 5,
-      "optimizer": "Adam",
-      "loss": "MSE",
-      "device": "gpu",
-      "seed": 42
-    },
-    "attention_lstm": {
-      "enabled": true,
-      "model_type": "deep_learning",
-      "framework": "pytorch",
-      "hidden_size": 128,
-      "num_layers": 2,
       "dropout": 0.1,
       "batch_size": 64,
       "learning_rate": 0.0005,
@@ -258,9 +241,39 @@
       "loss": "HuberLoss",
       "huber_delta": 1.0,
       "high_value_weighting": {
-        "enabled": true,
-        "quantile": 0.75,
-        "max_weight": 3.0
+        "enabled": false,
+        "mid_quantile": 0.75,
+        "high_quantile": 0.9,
+        "mid_weight": 2.0,
+        "high_weight": 3.0
+      },
+      "analysis": {
+        "peak_quantile": 0.9,
+        "peak_top_k": 5
+      },
+      "device": "gpu",
+      "seed": 42
+    },
+    "attention_lstm": {
+      "enabled": true,
+      "model_type": "deep_learning",
+      "framework": "pytorch",
+      "hidden_size": 256,
+      "num_layers": 2,
+      "dropout": 0.1,
+      "batch_size": 64,
+      "learning_rate": 0.001,
+      "epochs": 100,
+      "early_stopping_patience": 15,
+      "optimizer": "Adam",
+      "loss": "HuberLoss",
+      "huber_delta": 1.0,
+      "high_value_weighting": {
+        "enabled": false,
+        "mid_quantile": 0.75,
+        "high_quantile": 0.9,
+        "mid_weight": 2.0,
+        "high_weight": 3.0
       },
       "analysis": {
         "peak_quantile": 0.9,
@@ -303,6 +316,48 @@
           72
         ]
       }
+    }
+  },
+  "tuning": {
+    "attention_lstm": {
+      "selection_split": "validation",
+      "results_dir": "outputs/attention_lstm_tuning",
+      "results_csv": "outputs/attention_lstm_tuning/results.csv",
+      "best_params_json": "outputs/attention_lstm_tuning/best_params.json",
+      "search_space": {
+        "hidden_size": [
+          64,
+          128,
+          256
+        ],
+        "num_layers": [
+          1,
+          2
+        ],
+        "dropout": [
+          0.0,
+          0.1,
+          0.2
+        ],
+        "learning_rate": [
+          0.001,
+          0.0005,
+          0.0001
+        ]
+      },
+      "training": {
+        "epochs": 60,
+        "early_stopping_patience": 10,
+        "batch_size": 64,
+        "loss": "HuberLoss",
+        "huber_delta": 1.0,
+        "disable_high_value_weighting": true
+      },
+      "selection_priority": [
+        "R2",
+        "amplitude_pred",
+        "RMSE"
+      ]
     }
   },
   "outputs": {

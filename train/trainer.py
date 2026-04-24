@@ -108,6 +108,7 @@ def run_training_pipeline(config: dict[str, Any], selected_models: Iterable[str]
     # 数据准备阶段会生成规范 CSV、scaler、windows.npz 和处理日志。
     data = prepare_window_data(config)
     _validate_window_data(data, config)
+    deep_models = {"lstm", "attention_lstm"}
 
     results: dict[str, Any] = {}
     for model_name in models:
@@ -143,7 +144,7 @@ def run_training_pipeline(config: dict[str, Any], selected_models: Iterable[str]
             save_attention_stats(config, model_name, attention_weights)
 
         create_model_plots(y_true, y_pred, metrics, output_dir / "plots", attention_weights)
-        if model_name == "attention_lstm":
+        if model_name in deep_models:
             history = getattr(model, "training_history", [])
             save_training_history(config, model_name, history)
             if history:

@@ -78,11 +78,11 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 ```powershell
 # 配置清华大学镜像站
-pip config --user set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-pip config --user set global.timeout 120
+python -m pip config --user set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+python -m pip config --user set global.timeout 120
 
 # 检查配置
-pip config list
+python -m pip config list
 # 看到类似输出则配置成功:
 # global.index-url='https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple'
 # global.timeout='120'
