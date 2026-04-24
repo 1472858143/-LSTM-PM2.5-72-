@@ -1,0 +1,332 @@
+{
+  "config_version": "2.0",
+  "project": {
+    "name": "基于 Attention-LSTM 的北京市 PM2.5 浓度 72 小时多步预测系统",
+    "task_type": "pm25_72h_multi_step_forecasting",
+    "description": "统一管理数据、窗口、模型、评估、输出路径和运行环境配置。"
+  },
+  "environment": {
+    "python_version": "3.10+",
+    "framework": "pytorch",
+    "cuda": "cu126",
+    "seed": 42,
+    "required_core_packages": [
+      "pandas",
+      "numpy"
+    ],
+    "required_training_packages": [
+      "sklearn",
+      "statsmodels",
+      "xgboost",
+      "matplotlib",
+      "joblib",
+      "tqdm"
+    ],
+    "required_deep_learning_packages": [
+      "torch"
+    ],
+    "require_cuda_for_deep_learning": true
+  },
+  "global_constraints": {
+    "feature_count": 6,
+    "input_window_hours": 168,
+    "output_window_hours": 72,
+    "prediction_strategy": "direct_multi_output",
+    "recursive_prediction_allowed": false,
+    "shuffle_allowed": false,
+    "test_set_for_tuning_allowed": false,
+    "all_paths_from_config": true
+  },
+  "paths": {
+    "raw_input_csv": "data/Beijing_dataset_selected.csv",
+    "canonical_csv": "processed/pm25_hourly_canonical.csv",
+    "processed_dir": "processed",
+    "windows_npz": "processed/windows.npz",
+    "scaler_json": "processed/minmax_scaler.json",
+    "preprocess_log_json": "processed/preprocess_log.json",
+    "window_log_json": "processed/window_log.json",
+    "outputs_root": "outputs",
+    "metrics_summary_dir": "outputs/metrics_summary"
+  },
+  "data": {
+    "timestamp_column": "timestamp",
+    "canonical_columns": [
+      "timestamp",
+      "pm2_5",
+      "temperature_2m",
+      "humidity",
+      "wind_speed_10m",
+      "precipitation",
+      "surface_pressure"
+    ],
+    "model_input_features": [
+      "temperature_2m",
+      "humidity",
+      "wind_speed_10m",
+      "precipitation",
+      "surface_pressure",
+      "pm2_5"
+    ],
+    "target": "pm2_5",
+    "raw_to_canonical_field_mapping": {
+      "timestamp": "timestamp",
+      "pm25": "pm2_5",
+      "pm2.5": "pm2_5",
+      "pm_2.5": "pm2_5",
+      "pm2_5": "pm2_5",
+      "PM2.5": "pm2_5",
+      "temp": "temperature_2m",
+      "temperature": "temperature_2m",
+      "temperature_2m": "temperature_2m",
+      "humidity": "humidity",
+      "relative_humidity_2m": "humidity",
+      "wind_speed": "wind_speed_10m",
+      "wind_speed_10m": "wind_speed_10m",
+      "precipitation": "precipitation",
+      "rain": "precipitation",
+      "pressure": "surface_pressure",
+      "surface_pressure": "surface_pressure"
+    }
+  },
+  "preprocessing": {
+    "time_order": "ascending",
+    "hourly_frequency": "h",
+    "duplicate_timestamp_strategy": "mean",
+    "max_fill_gap_hours": 6,
+    "outliers": {
+      "pm2_5_min": 0,
+      "humidity_min": 0,
+      "humidity_max": 100,
+      "wind_speed_10m_min": 0,
+      "precipitation_min": 0,
+      "temperature_2m_min": -40,
+      "temperature_2m_max": 50,
+      "surface_pressure_min": 850,
+      "surface_pressure_max": 1100
+    },
+    "scaler": {
+      "name": "MinMaxScaler",
+      "fit_on": "train",
+      "inverse_transform_before_metrics": true,
+      "save_scaler": true
+    }
+  },
+  "window": {
+    "input_window_hours": 168,
+    "output_window_hours": 72,
+    "step_hours": 1,
+    "input_shape": [
+      168,
+      6
+    ],
+    "output_shape": [
+      72
+    ]
+  },
+  "split": {
+    "method": "time_order",
+    "train_ratio": 0.7,
+    "validation_ratio": 0.15,
+    "test_ratio": 0.15,
+    "shuffle": false,
+    "prevent_window_boundary_leakage": true
+  },
+  "models": {
+    "allowed_model_names": [
+      "arima",
+      "sarima",
+      "xgboost",
+      "random_forest",
+      "lstm",
+      "attention_lstm"
+    ],
+    "arima": {
+      "enabled": true,
+      "model_type": "traditional_time_series",
+      "input_type": "single_variable_pm25",
+      "parameter_selection": "auto_search",
+      "selection_criterion": "aic",
+      "p_values": [
+        0,
+        1,
+        2
+      ],
+      "d_values": [
+        0,
+        1
+      ],
+      "q_values": [
+        0,
+        1,
+        2
+      ],
+      "selection_train_points": 2000,
+      "forecast_horizon": 72,
+      "refit_each_window": true
+    },
+    "sarima": {
+      "enabled": true,
+      "model_type": "traditional_time_series",
+      "input_type": "single_variable_pm25",
+      "parameter_selection": "auto_search",
+      "selection_criterion": "aic",
+      "p_values": [
+        0,
+        1
+      ],
+      "d_values": [
+        0,
+        1
+      ],
+      "q_values": [
+        0,
+        1
+      ],
+      "P_values": [
+        0,
+        1
+      ],
+      "D_values": [
+        0,
+        1
+      ],
+      "Q_values": [
+        0,
+        1
+      ],
+      "seasonal_period": 24,
+      "selection_train_points": 2000,
+      "forecast_horizon": 72,
+      "refit_each_window": true
+    },
+    "xgboost": {
+      "enabled": true,
+      "model_type": "machine_learning",
+      "input_type": "flatten_window",
+      "input_dim_after_flatten": 1008,
+      "output_dim": 72,
+      "n_estimators": 300,
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "objective": "reg:squarederror",
+      "random_state": 42,
+      "n_jobs": -1
+    },
+    "random_forest": {
+      "enabled": true,
+      "model_type": "machine_learning",
+      "input_type": "flatten_window",
+      "input_dim_after_flatten": 1008,
+      "output_dim": 72,
+      "n_estimators": 200,
+      "max_depth": 15,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1,
+      "random_state": 42,
+      "n_jobs": -1
+    },
+    "lstm": {
+      "enabled": true,
+      "model_type": "deep_learning",
+      "framework": "pytorch",
+      "hidden_size": 128,
+      "num_layers": 2,
+      "dropout": 0.2,
+      "batch_size": 64,
+      "learning_rate": 0.001,
+      "epochs": 50,
+      "early_stopping_patience": 5,
+      "optimizer": "Adam",
+      "loss": "MSE",
+      "device": "gpu",
+      "seed": 42
+    },
+    "attention_lstm": {
+      "enabled": true,
+      "model_type": "deep_learning",
+      "framework": "pytorch",
+      "hidden_size": 128,
+      "num_layers": 2,
+      "dropout": 0.1,
+      "batch_size": 64,
+      "learning_rate": 0.0005,
+      "epochs": 100,
+      "early_stopping_patience": 15,
+      "optimizer": "Adam",
+      "loss": "HuberLoss",
+      "huber_delta": 1.0,
+      "high_value_weighting": {
+        "enabled": true,
+        "quantile": 0.75,
+        "max_weight": 3.0
+      },
+      "analysis": {
+        "peak_quantile": 0.9,
+        "peak_top_k": 5
+      },
+      "device": "gpu",
+      "seed": 42,
+      "output_attention_weights": true,
+      "attention_weights_path": "outputs/attention_lstm/attention_weights.npy"
+    }
+  },
+  "evaluation": {
+    "metrics": [
+      "RMSE",
+      "MAE",
+      "MAPE",
+      "R2",
+      "SMAPE",
+      "MSE",
+      "Explained Variance",
+      "Max Error"
+    ],
+    "mape_denominator_min": 1,
+    "calculate_on_inverse_transformed_values": true,
+    "multi_step_analysis": {
+      "overall_error": true,
+      "stage_error": true,
+      "horizon_curve": true,
+      "stages": {
+        "h1_24": [
+          1,
+          24
+        ],
+        "h25_48": [
+          25,
+          48
+        ],
+        "h49_72": [
+          49,
+          72
+        ]
+      }
+    }
+  },
+  "outputs": {
+    "root": "outputs",
+    "predictions_csv_columns": [
+      "sample_id",
+      "timestamp",
+      "horizon",
+      "y_true",
+      "y_pred"
+    ],
+    "required_model_artifacts": [
+      "predictions.csv",
+      "metrics.json",
+      "plots/",
+      "model.pt"
+    ],
+    "model_dirs": {
+      "arima": "outputs/arima",
+      "sarima": "outputs/sarima",
+      "xgboost": "outputs/xgboost",
+      "random_forest": "outputs/random_forest",
+      "lstm": "outputs/lstm",
+      "attention_lstm": "outputs/attention_lstm"
+    }
+  }
+}

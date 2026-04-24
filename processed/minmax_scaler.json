@@ -1,0 +1,28 @@
+{
+  "name": "MinMaxScaler",
+  "feature_columns": [
+    "temperature_2m",
+    "humidity",
+    "wind_speed_10m",
+    "precipitation",
+    "surface_pressure",
+    "pm2_5"
+  ],
+  "target_column": "pm2_5",
+  "data_min": {
+    "temperature_2m": -21.0,
+    "humidity": 5.600802103,
+    "wind_speed_10m": 0.0,
+    "precipitation": 0.0,
+    "surface_pressure": 984.3,
+    "pm2_5": 1.057142857
+  },
+  "data_max": {
+    "temperature_2m": 42.0,
+    "humidity": 100.0,
+    "wind_speed_10m": 17.0,
+    "precipitation": 13.33333333,
+    "surface_pressure": 1041.8,
+    "pm2_5": 405.962963
+  }
+}

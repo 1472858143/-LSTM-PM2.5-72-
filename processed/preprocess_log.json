@@ -1,0 +1,42 @@
+{
+  "raw_path": "E:\\基于注意力机制 LSTM 的北京市 PM2.5 浓度 72 小时多步预测研究\\data\\Beijing_dataset_selected.csv",
+  "canonical_path": "E:\\基于注意力机制 LSTM 的北京市 PM2.5 浓度 72 小时多步预测研究\\processed\\pm25_hourly_canonical.csv",
+  "raw_rows": 23058,
+  "canonical_rows": 23206,
+  "invalid_timestamps_dropped": 0,
+  "duplicate_rows_removed": 0,
+  "inserted_missing_timestamps": 148,
+  "outliers_marked_as_missing": {
+    "pm2_5": 0,
+    "humidity": 0,
+    "wind_speed_10m": 0,
+    "precipitation": 0,
+    "temperature_2m": 0,
+    "surface_pressure": 0
+  },
+  "missing_before_fill": {
+    "pm2_5": 0,
+    "temperature_2m": 551,
+    "humidity": 580,
+    "wind_speed_10m": 537,
+    "precipitation": 535,
+    "surface_pressure": 535
+  },
+  "missing_after_fill": {
+    "pm2_5": 59,
+    "temperature_2m": 397,
+    "humidity": 397,
+    "wind_speed_10m": 397,
+    "precipitation": 397,
+    "surface_pressure": 397
+  },
+  "canonical_columns": [
+    "timestamp",
+    "pm2_5",
+    "temperature_2m",
+    "humidity",
+    "wind_speed_10m",
+    "precipitation",
+    "surface_pressure"
+  ]
+}

@@ -1,0 +1,6 @@
+# PyTorch CUDA 12.6 must be installed from the official PyTorch wheel index.
+# Example:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+#
+# The training entrypoint checks torch.cuda.is_available() and stops deep-learning
+# runs when CUDA is unavailable.
