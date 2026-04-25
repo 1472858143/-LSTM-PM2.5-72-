@@ -85,6 +85,11 @@ def _build_trial_config(base_config: dict[str, Any], params: dict[str, Any]) -> 
     model_cfg["batch_size"] = int(training_cfg["batch_size"])
     model_cfg["loss"] = str(training_cfg["loss"])
     model_cfg["huber_delta"] = float(training_cfg["huber_delta"])
+    model_cfg["checkpoint_metric"] = str(training_cfg.get("checkpoint_metric", "q80_then_h1_then_rmse"))
+    model_cfg["scheduler"] = str(training_cfg.get("scheduler", "ReduceLROnPlateau"))
+    model_cfg["scheduler_factor"] = float(training_cfg.get("scheduler_factor", 0.5))
+    model_cfg["scheduler_patience"] = int(training_cfg.get("scheduler_patience", 3))
+    model_cfg["scheduler_min_lr"] = float(training_cfg.get("scheduler_min_lr", 1e-5))
 
     # 本轮调参只看基础损失与网络容量，不启用高值样本加权，避免把训练目标再引向新的变量。
     model_cfg.setdefault("high_value_weighting", {})
@@ -188,10 +193,11 @@ def _save_best_outputs(
     model.save(output_dir / "model.pt")
 
     attention_weights = getattr(model, "attention_weights", None)
+    attention_diagnostics = getattr(model, "attention_diagnostics", None)
     if attention_weights is not None:
         attention_path = resolve_path(config["models"][model_name]["attention_weights_path"])
         model.save_attention_weights(attention_path)
-        save_attention_stats(config, model_name, attention_weights)
+        save_attention_stats(config, model_name, attention_weights, attention_diagnostics)
 
     create_model_plots(
         evaluation["y_true"],

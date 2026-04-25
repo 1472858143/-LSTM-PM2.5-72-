@@ -244,6 +244,7 @@ def run_training_pipeline(
                     for message in MODEL_STAGES[:3]:
                         _advance_stage(runtime_config, executed_steps, message)
 
+                    set_global_seed(int(runtime_config["environment"]["seed"]))
                     model = _instantiate_model(model_name, runtime_config)
 
                     _advance_stage(runtime_config, executed_steps, MODEL_STAGES[3])
@@ -266,10 +267,11 @@ def run_training_pipeline(
                     model.save(output_dir / "model.pt")
 
                     attention_weights = getattr(model, "attention_weights", None)
+                    attention_diagnostics = getattr(model, "attention_diagnostics", None)
                     if model_name == "attention_lstm" and attention_weights is not None:
                         attention_path = resolve_path(model_cfg["attention_weights_path"])
                         model.save_attention_weights(attention_path)
-                        save_attention_stats(runtime_config, model_name, attention_weights)
+                        save_attention_stats(runtime_config, model_name, attention_weights, attention_diagnostics)
 
                     create_model_plots(
                         y_true,

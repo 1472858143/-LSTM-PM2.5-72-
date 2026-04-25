@@ -13,12 +13,12 @@ from utils.runtime import active_window_name
 
 
 def model_output_dir(config: dict[str, Any], model_name: str) -> Path:
-    """返回当前窗口实验下的模型输出目录。"""
+    """Return the model output directory for the active window."""
     return resolve_path(config["outputs"]["model_dirs"][model_name])
 
 
 def prepare_model_output_dir(config: dict[str, Any], model_name: str) -> Path:
-    """创建模型输出目录和 plots 子目录。"""
+    """Ensure the model output directory and plots subdirectory exist."""
     output_dir = model_output_dir(config, model_name)
     (output_dir / "plots").mkdir(parents=True, exist_ok=True)
     return output_dir
@@ -31,7 +31,7 @@ def save_predictions(
     y_pred: np.ndarray,
     target_timestamps: np.ndarray,
 ) -> Path:
-    """保存统一预测结果。"""
+    """Save the unified predictions.csv artifact."""
     output_dir = prepare_model_output_dir(config, model_name)
     rows: list[dict[str, Any]] = []
     sample_count, horizon_count = y_true.shape
@@ -55,7 +55,7 @@ def save_predictions(
 
 
 def save_metrics(config: dict[str, Any], model_name: str, metrics: dict[str, Any]) -> Path:
-    """保存 metrics.json。"""
+    """Save metrics.json."""
     output_dir = prepare_model_output_dir(config, model_name)
     path = output_dir / "metrics.json"
     with path.open("w", encoding="utf-8") as f:
@@ -64,7 +64,7 @@ def save_metrics(config: dict[str, Any], model_name: str, metrics: dict[str, Any
 
 
 def save_config_snapshot(config: dict[str, Any], model_name: str) -> Path:
-    """保存本次运行配置快照。"""
+    """Save a snapshot of the current runtime config."""
     output_dir = prepare_model_output_dir(config, model_name)
     path = output_dir / "config_snapshot.json"
     serializable = {k: v for k, v in config.items() if not k.startswith("_")}
@@ -74,7 +74,7 @@ def save_config_snapshot(config: dict[str, Any], model_name: str) -> Path:
 
 
 def copy_metrics_to_summary(config: dict[str, Any], model_name: str) -> None:
-    """复制单模型 metrics.json 到汇总目录，文件名包含窗口名。"""
+    """Copy per-model metrics.json into the summary directory."""
     src = model_output_dir(config, model_name) / "metrics.json"
     dst_dir = resolve_path(config["paths"]["metrics_summary_dir"])
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +84,7 @@ def copy_metrics_to_summary(config: dict[str, Any], model_name: str) -> None:
 
 
 def save_metrics_tables(config: dict[str, Any], model_name: str, metrics: dict[str, Any]) -> None:
-    """额外保存分阶段和逐 horizon 指标 CSV。"""
+    """Save stage and horizon CSV tables."""
     output_dir = prepare_model_output_dir(config, model_name)
     stage_rows = [{"stage": stage, **values} for stage, values in metrics["stages"].items()]
     pd.DataFrame(stage_rows).to_csv(output_dir / "stage_metrics.csv", index=False, encoding="utf-8")
@@ -92,7 +92,7 @@ def save_metrics_tables(config: dict[str, Any], model_name: str, metrics: dict[s
 
 
 def save_training_history(config: dict[str, Any], model_name: str, history: list[dict[str, Any]]) -> None:
-    """保存训练过程曲线数据，不覆盖运行级 training_log.json。"""
+    """Save training history JSON/CSV artifacts."""
     if not history:
         return
     output_dir = prepare_model_output_dir(config, model_name)
@@ -101,18 +101,68 @@ def save_training_history(config: dict[str, Any], model_name: str, history: list
     pd.DataFrame(history).to_csv(output_dir / "training_history.csv", index=False, encoding="utf-8")
 
 
+def _attention_segment_stats(weights: np.ndarray) -> dict[str, Any]:
+    array = np.asarray(weights, dtype=float)
+    entropy = -(array * np.log(np.clip(array, 1e-12, None))).sum(axis=1)
+    sorted_weights = np.sort(array, axis=1)[:, ::-1]
+    uniform_entropy = float(np.log(array.shape[1]))
+    mean_weights = array.mean(axis=0)
+    top_indices = np.argsort(mean_weights)[-5:][::-1]
+    segment_length = max(array.shape[1] // 10, 1)
+    first_10pct_mass = float(array[:, :segment_length].sum(axis=1).mean())
+    last_10pct_mass = float(array[:, -segment_length:].sum(axis=1).mean())
+    index_axis = np.arange(array.shape[1], dtype=float)
+    index_std = float(index_axis.std())
+    centered_index = index_axis - index_axis.mean()
+    correlations: list[float] = []
+    for row in array:
+        row_std = float(row.std())
+        if row_std <= 1e-12 or index_std <= 1e-12:
+            correlations.append(0.0)
+            continue
+        centered_row = row - row.mean()
+        corr = float(np.mean(centered_index * centered_row) / (index_std * row_std))
+        correlations.append(corr)
+    return {
+        "shape": list(array.shape),
+        "uniform_weight": float(1.0 / array.shape[1]),
+        "mean": float(array.mean()),
+        "std": float(array.std()),
+        "min": float(array.min()),
+        "max": float(array.max()),
+        "top_1_weight": float(sorted_weights[:, 0].mean()),
+        "top_5_weight_sum": float(sorted_weights[:, :5].sum(axis=1).mean()),
+        "top_10_weight_sum": float(sorted_weights[:, :10].sum(axis=1).mean()),
+        "max_per_sample_mean": float(array.max(axis=1).mean()),
+        "max_per_sample_p95": float(np.percentile(array.max(axis=1), 95)),
+        "entropy_mean": float(entropy.mean()),
+        "entropy_std": float(entropy.std()),
+        "uniform_entropy": uniform_entropy,
+        "entropy_ratio_to_uniform": float(entropy.mean() / uniform_entropy),
+        "near_uniform": bool(entropy.mean() / uniform_entropy > 0.999),
+        "first_10pct_mass": first_10pct_mass,
+        "last_10pct_mass": last_10pct_mass,
+        "index_correlation": float(np.mean(correlations)) if correlations else 0.0,
+        "top_mean_weight_steps": [
+            {"input_step": int(index + 1), "mean_weight": float(mean_weights[index])}
+            for index in top_indices
+        ],
+    }
+
+
 def save_execution_log(
     config: dict[str, Any],
     model_name: str,
     execution_log: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """保存模型运行日志与状态。"""
+    """Save the runtime training_log.json artifact."""
     output_dir = prepare_model_output_dir(config, model_name)
     log_payload = dict(execution_log)
 
     if history:
-        best_row = min(history, key=lambda row: float(row["validation_loss"]))
+        best_rows = [row for row in history if bool(row.get("is_best_epoch", False))]
+        best_row = best_rows[-1] if best_rows else min(history, key=lambda row: float(row["validation_loss"]))
         log_payload.update(
             {
                 "best_epoch": int(best_row["epoch"]),
@@ -121,6 +171,21 @@ def save_execution_log(
                 "epochs_completed": int(len(history)),
             }
         )
+        for key in [
+            "val_rmse",
+            "val_q80_mae",
+            "val_q90_mae",
+            "val_h1_rmse",
+            "best_val_rmse",
+            "best_val_q80_mae",
+            "best_val_q90_mae",
+            "best_val_h1_rmse",
+            "checkpoint_metric",
+        ]:
+            if key not in best_row:
+                continue
+            value = best_row[key]
+            log_payload[key] = float(value) if isinstance(value, (int, float)) else value
 
     path = output_dir / "training_log.json"
     with path.open("w", encoding="utf-8") as f:
@@ -128,37 +193,46 @@ def save_execution_log(
     return path
 
 
-def save_attention_stats(config: dict[str, Any], model_name: str, attention_weights: np.ndarray) -> Path:
-    """保存 Attention 权重统计。"""
+def save_attention_stats(
+    config: dict[str, Any],
+    model_name: str,
+    attention_weights: np.ndarray,
+    diagnostics: dict[str, np.ndarray] | None = None,
+) -> Path:
+    """Save attention summary statistics."""
     output_dir = prepare_model_output_dir(config, model_name)
-    weights = np.asarray(attention_weights, dtype=float)
-    entropy = -(weights * np.log(np.clip(weights, 1e-12, None))).sum(axis=1)
-    sorted_weights = np.sort(weights, axis=1)[:, ::-1]
-    uniform_entropy = float(np.log(weights.shape[1]))
-    mean_weights = weights.mean(axis=0)
-    top_indices = np.argsort(mean_weights)[-5:][::-1]
-    stats = {
-        "shape": list(weights.shape),
-        "uniform_weight": float(1.0 / weights.shape[1]),
-        "mean": float(weights.mean()),
-        "std": float(weights.std()),
-        "min": float(weights.min()),
-        "max": float(weights.max()),
-        "top_1_weight": float(sorted_weights[:, 0].mean()),
-        "top_5_weight_sum": float(sorted_weights[:, :5].sum(axis=1).mean()),
-        "top_10_weight_sum": float(sorted_weights[:, :10].sum(axis=1).mean()),
-        "max_per_sample_mean": float(weights.max(axis=1).mean()),
-        "max_per_sample_p95": float(np.percentile(weights.max(axis=1), 95)),
-        "entropy_mean": float(entropy.mean()),
-        "entropy_std": float(entropy.std()),
-        "uniform_entropy": uniform_entropy,
-        "entropy_ratio_to_uniform": float(entropy.mean() / uniform_entropy),
-        "near_uniform": bool(entropy.mean() / uniform_entropy > 0.999),
-        "top_mean_weight_steps": [
-            {"input_step": int(index + 1), "mean_weight": float(mean_weights[index])}
-            for index in top_indices
-        ],
-    }
+    stats = _attention_segment_stats(np.asarray(attention_weights, dtype=float))
+    stats["combined_first_10pct_mass"] = stats["first_10pct_mass"]
+    stats["combined_last_10pct_mass"] = stats["last_10pct_mass"]
+
+    if diagnostics:
+        gate = diagnostics.get("gate")
+        raw_gate = diagnostics.get("raw_gate")
+        global_profile = diagnostics.get("global_profile")
+        recent_profile = diagnostics.get("recent_profile")
+        combined_profile = diagnostics.get("combined_profile")
+
+        if gate is not None:
+            gate_arr = np.asarray(gate, dtype=float).reshape(-1)
+            stats["gate_mean"] = float(gate_arr.mean())
+            stats["gate_std"] = float(gate_arr.std())
+        if raw_gate is not None:
+            raw_gate_arr = np.asarray(raw_gate, dtype=float).reshape(-1)
+            stats["raw_gate_mean"] = float(raw_gate_arr.mean())
+            stats["raw_gate_std"] = float(raw_gate_arr.std())
+        if global_profile is not None:
+            global_stats = _attention_segment_stats(np.asarray(global_profile, dtype=float))
+            stats["global_first_10pct_mass"] = float(global_stats["first_10pct_mass"])
+            stats["global_last_10pct_mass"] = float(global_stats["last_10pct_mass"])
+        if recent_profile is not None:
+            recent_stats = _attention_segment_stats(np.asarray(recent_profile, dtype=float))
+            stats["recent_first_10pct_mass"] = float(recent_stats["first_10pct_mass"])
+            stats["recent_last_10pct_mass"] = float(recent_stats["last_10pct_mass"])
+        if combined_profile is not None:
+            combined_stats = _attention_segment_stats(np.asarray(combined_profile, dtype=float))
+            stats["combined_first_10pct_mass"] = float(combined_stats["first_10pct_mass"])
+            stats["combined_last_10pct_mass"] = float(combined_stats["last_10pct_mass"])
+
     path = output_dir / "attention_stats.json"
     with path.open("w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
@@ -172,7 +246,7 @@ def save_peak_analysis(
     y_pred: np.ndarray,
     target_timestamps: np.ndarray,
 ) -> dict[str, Any]:
-    """保存测试集中高峰值样本的逐 horizon 对比。"""
+    """Save top-peak prediction cases for qualitative inspection."""
     output_dir = prepare_model_output_dir(config, model_name)
     analysis_cfg = config["models"][model_name].get("analysis", {})
     peak_quantile = float(analysis_cfg.get("peak_quantile", 0.9))
@@ -219,7 +293,7 @@ def save_metrics_summary_tables(
     stage_rows: list[dict[str, Any]],
     horizon_rows: list[dict[str, Any]],
 ) -> None:
-    """生成跨窗口、跨模型的汇总指标 CSV。"""
+    """Generate cross-window summary CSV tables."""
     summary_dir = resolve_path(config["paths"]["metrics_summary_dir"])
     summary_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(window_rows).to_csv(summary_dir / "window_model_metrics.csv", index=False, encoding="utf-8")
