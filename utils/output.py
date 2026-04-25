@@ -173,6 +173,7 @@ def save_execution_log(
         )
         for key in [
             "val_rmse",
+            "val_stage1_rmse",
             "val_q80_mae",
             "val_q90_mae",
             "val_h1_rmse",
@@ -180,6 +181,8 @@ def save_execution_log(
             "best_val_q80_mae",
             "best_val_q90_mae",
             "best_val_h1_rmse",
+            "selection_score",
+            "best_selection_score",
             "checkpoint_metric",
         ]:
             if key not in best_row:
@@ -206,6 +209,8 @@ def save_attention_stats(
     stats["combined_last_10pct_mass"] = stats["last_10pct_mass"]
 
     if diagnostics:
+        branch_profiles = diagnostics.get("branch_profiles")
+        branch_gates = diagnostics.get("branch_gates")
         gate = diagnostics.get("gate")
         raw_gate = diagnostics.get("raw_gate")
         global_profile = diagnostics.get("global_profile")
@@ -232,6 +237,18 @@ def save_attention_stats(
             combined_stats = _attention_segment_stats(np.asarray(combined_profile, dtype=float))
             stats["combined_first_10pct_mass"] = float(combined_stats["first_10pct_mass"])
             stats["combined_last_10pct_mass"] = float(combined_stats["last_10pct_mass"])
+        if isinstance(branch_gates, dict):
+            stats["branch_gate_mean"] = {}
+            stats["branch_gate_std"] = {}
+            for name, values in branch_gates.items():
+                gate_arr = np.asarray(values, dtype=float).reshape(-1)
+                stats["branch_gate_mean"][name] = float(gate_arr.mean())
+                stats["branch_gate_std"][name] = float(gate_arr.std())
+        if isinstance(branch_profiles, dict):
+            for name, values in branch_profiles.items():
+                branch_stats = _attention_segment_stats(np.asarray(values, dtype=float))
+                stats[f"{name}_first_10pct_mass"] = float(branch_stats["first_10pct_mass"])
+                stats[f"{name}_last_10pct_mass"] = float(branch_stats["last_10pct_mass"])
 
     path = output_dir / "attention_stats.json"
     with path.open("w", encoding="utf-8") as f:

@@ -6,16 +6,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-"""配置读取与运行时窗口实验配置工具。"""
-
-
 def project_root() -> Path:
-    """返回项目根目录，用于解析配置中的相对路径。"""
     return Path(__file__).resolve().parents[1]
 
 
 def resolve_path(path_value: str | Path, root: Path | None = None) -> Path:
-    """解析配置路径。"""
     path = Path(path_value)
     if path.is_absolute():
         return path
@@ -23,7 +18,6 @@ def resolve_path(path_value: str | Path, root: Path | None = None) -> Path:
 
 
 def load_config(config_path: str | Path = "config/config.json") -> dict[str, Any]:
-    """读取全局配置并附加运行时元信息。"""
     path = resolve_path(config_path)
     with path.open("r", encoding="utf-8") as f:
         config = json.load(f)
@@ -33,15 +27,23 @@ def load_config(config_path: str | Path = "config/config.json") -> dict[str, Any
 
 
 def dump_json(data: Any, path: str | Path, indent: int = 2) -> None:
-    """保存 JSON。"""
     output_path = resolve_path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=indent)
 
 
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def get_window_experiments(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """返回启用的窗口实验；若未配置则退回单窗口默认配置。"""
     experiments = config.get("window_experiments")
     if experiments:
         enabled = [item for item in experiments if item.get("enabled", True)]
@@ -63,7 +65,6 @@ def normalize_window_selection(
     config: dict[str, Any],
     windows: Iterable[str] | str | None,
 ) -> list[dict[str, Any]]:
-    """校验命令行传入的窗口实验名称。"""
     experiments = get_window_experiments(config)
     name_to_experiment = {item["name"]: item for item in experiments}
 
@@ -83,7 +84,6 @@ def normalize_window_selection(
 
 
 def apply_window_experiment(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, Any]:
-    """基于窗口实验生成本次运行的配置副本。"""
     window_name = str(experiment["name"])
     input_window = int(experiment["input_window_hours"])
     output_window = int(experiment["output_window_hours"])
@@ -116,8 +116,18 @@ def apply_window_experiment(config: dict[str, Any], experiment: dict[str, Any]) 
     return config_copy
 
 
+def apply_model_window_profile(config: dict[str, Any], model_name: str) -> dict[str, Any]:
+    active_window = str(config.get("_active_window_name", ""))
+    model_cfg = config["models"][model_name]
+    window_profiles = model_cfg.get("window_profiles", {})
+    if not active_window or active_window not in window_profiles:
+        return config
+
+    config["models"][model_name] = _deep_merge_dict(model_cfg, window_profiles[active_window])
+    return config
+
+
 def ensure_project_dirs(config: dict[str, Any]) -> None:
-    """创建 processed、outputs 与 metrics_summary 目录。"""
     paths = config["paths"]
     for key in ["processed_dir", "outputs_root", "metrics_summary_dir"]:
         resolve_path(paths[key]).mkdir(parents=True, exist_ok=True)

@@ -262,6 +262,77 @@
       "analysis": {
         "peak_quantile": 0.9,
         "peak_top_k": 5
+      },
+      "window_profiles": {
+        "input_720h": {
+          "num_layers": 1,
+          "dropout": 0.2,
+          "batch_size": 64,
+          "learning_rate": 0.0003,
+          "epochs": 120,
+          "early_stopping_patience": 15,
+          "optimizer": "AdamW",
+          "weight_decay": 0.0001,
+          "grad_clip": 1.0,
+          "scheduler": "ReduceLROnPlateau",
+          "scheduler_factor": 0.5,
+          "scheduler_patience": 3,
+          "scheduler_min_lr": 1e-5,
+          "branch_layout": [
+            "context",
+            "recent"
+          ],
+          "branch_hidden_sizes": {
+            "context": 64,
+            "recent": 128
+          },
+          "pool_sizes_hours": {
+            "context": 6,
+            "recent": 1
+          },
+          "selection_score_weights": {
+            "rmse": 0.5,
+            "stage1_rmse": 0.3,
+            "q90_mae": 0.2
+          },
+          "loss_beta": 12.0
+        },
+        "input_2160h": {
+          "num_layers": 1,
+          "dropout": 0.2,
+          "batch_size": 32,
+          "learning_rate": 0.0002,
+          "epochs": 140,
+          "early_stopping_patience": 18,
+          "optimizer": "AdamW",
+          "weight_decay": 0.0002,
+          "grad_clip": 1.0,
+          "scheduler": "ReduceLROnPlateau",
+          "scheduler_factor": 0.5,
+          "scheduler_patience": 3,
+          "scheduler_min_lr": 1e-5,
+          "branch_layout": [
+            "far",
+            "mid",
+            "recent"
+          ],
+          "branch_hidden_sizes": {
+            "far": 48,
+            "mid": 64,
+            "recent": 128
+          },
+          "pool_sizes_hours": {
+            "far": 24,
+            "mid": 6,
+            "recent": 1
+          },
+          "selection_score_weights": {
+            "rmse": 0.5,
+            "stage1_rmse": 0.3,
+            "q90_mae": 0.2
+          },
+          "loss_beta": 12.0
+        }
       }
     },
     "attention_lstm": {
@@ -293,7 +364,78 @@
         "peak_top_k": 5
       },
       "output_attention_weights": true,
-      "attention_weights_path": "outputs/attention_lstm/attention_weights.npy"
+      "attention_weights_path": "outputs/attention_lstm/attention_weights.npy",
+      "window_profiles": {
+        "input_720h": {
+          "num_layers": 1,
+          "dropout": 0.2,
+          "batch_size": 64,
+          "learning_rate": 0.0002,
+          "epochs": 120,
+          "early_stopping_patience": 18,
+          "optimizer": "AdamW",
+          "weight_decay": 0.0001,
+          "grad_clip": 1.0,
+          "scheduler": "ReduceLROnPlateau",
+          "scheduler_factor": 0.5,
+          "scheduler_patience": 3,
+          "scheduler_min_lr": 1e-5,
+          "branch_layout": [
+            "context",
+            "recent"
+          ],
+          "branch_hidden_sizes": {
+            "context": 64,
+            "recent": 128
+          },
+          "pool_sizes_hours": {
+            "context": 6,
+            "recent": 1
+          },
+          "selection_score_weights": {
+            "rmse": 0.5,
+            "stage1_rmse": 0.3,
+            "q90_mae": 0.2
+          },
+          "loss_beta": 12.0
+        },
+        "input_2160h": {
+          "num_layers": 1,
+          "dropout": 0.2,
+          "batch_size": 32,
+          "learning_rate": 0.00015,
+          "epochs": 140,
+          "early_stopping_patience": 20,
+          "optimizer": "AdamW",
+          "weight_decay": 0.0002,
+          "grad_clip": 1.0,
+          "scheduler": "ReduceLROnPlateau",
+          "scheduler_factor": 0.5,
+          "scheduler_patience": 3,
+          "scheduler_min_lr": 1e-5,
+          "branch_layout": [
+            "far",
+            "mid",
+            "recent"
+          ],
+          "branch_hidden_sizes": {
+            "far": 48,
+            "mid": 64,
+            "recent": 128
+          },
+          "pool_sizes_hours": {
+            "far": 24,
+            "mid": 6,
+            "recent": 1
+          },
+          "selection_score_weights": {
+            "rmse": 0.5,
+            "stage1_rmse": 0.3,
+            "q90_mae": 0.2
+          },
+          "loss_beta": 12.0
+        }
+      }
     }
   },
   "evaluation": {
@@ -330,51 +472,90 @@
     }
   },
   "tuning": {
-    "attention_lstm": {
+    "long_window_deep_models": {
       "selection_split": "validation",
-      "results_dir": "outputs/attention_lstm_tuning",
-      "results_csv": "outputs/attention_lstm_tuning/results.csv",
-      "best_params_json": "outputs/attention_lstm_tuning/best_params.json",
-      "search_space": {
-        "hidden_size": [
-          64,
-          128,
-          256
-        ],
-        "num_layers": [
-          1,
-          2
-        ],
-        "dropout": [
-          0.0,
-          0.1,
-          0.2
-        ],
-        "learning_rate": [
-          0.001,
-          0.0005,
-          0.0001
-        ]
-      },
-      "training": {
-        "epochs": 60,
-        "early_stopping_patience": 10,
-        "batch_size": 64,
-        "loss": "HuberWeightedPeak",
-        "huber_delta": 1.0,
-        "recent_gate_cap": 0.12,
-        "checkpoint_metric": "q80_then_h1_then_rmse",
-        "scheduler": "ReduceLROnPlateau",
-        "scheduler_factor": 0.5,
-        "scheduler_patience": 3,
-        "scheduler_min_lr": 1e-5,
-        "disable_high_value_weighting": true
-      },
-      "selection_priority": [
-        "R2",
-        "amplitude_pred",
-        "RMSE"
-      ]
+      "windows": {
+        "input_720h": {
+          "lstm": {
+            "results_dir": "outputs/tuning/input_720h/lstm",
+            "results_csv": "outputs/tuning/input_720h/lstm/results.csv",
+            "best_params_json": "outputs/tuning/input_720h/lstm/best_params.json",
+            "search_space": {
+              "dropout": [
+                0.1,
+                0.2
+              ],
+              "learning_rate_scale": [
+                1.0,
+                0.6666666667
+              ],
+              "weight_decay": [
+                0.0001,
+                0.0002
+              ]
+            }
+          },
+          "attention_lstm": {
+            "results_dir": "outputs/tuning/input_720h/attention_lstm",
+            "results_csv": "outputs/tuning/input_720h/attention_lstm/results.csv",
+            "best_params_json": "outputs/tuning/input_720h/attention_lstm/best_params.json",
+            "search_space": {
+              "dropout": [
+                0.1,
+                0.2
+              ],
+              "learning_rate_scale": [
+                1.0,
+                0.6666666667
+              ],
+              "weight_decay": [
+                0.0001,
+                0.0002
+              ]
+            }
+          }
+        },
+        "input_2160h": {
+          "lstm": {
+            "results_dir": "outputs/tuning/input_2160h/lstm",
+            "results_csv": "outputs/tuning/input_2160h/lstm/results.csv",
+            "best_params_json": "outputs/tuning/input_2160h/lstm/best_params.json",
+            "search_space": {
+              "dropout": [
+                0.1,
+                0.2
+              ],
+              "learning_rate_scale": [
+                1.0,
+                0.6666666667
+              ],
+              "weight_decay": [
+                0.0001,
+                0.0002
+              ]
+            }
+          },
+          "attention_lstm": {
+            "results_dir": "outputs/tuning/input_2160h/attention_lstm",
+            "results_csv": "outputs/tuning/input_2160h/attention_lstm/results.csv",
+            "best_params_json": "outputs/tuning/input_2160h/attention_lstm/best_params.json",
+            "search_space": {
+              "dropout": [
+                0.1,
+                0.2
+              ],
+              "learning_rate_scale": [
+                1.0,
+                0.6666666667
+              ],
+              "weight_decay": [
+                0.0001,
+                0.0002
+              ]
+            }
+          }
+        }
+      }
     }
   },
   "outputs": {

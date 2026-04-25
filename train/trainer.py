@@ -6,7 +6,13 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from utils.config import apply_window_experiment, ensure_project_dirs, normalize_window_selection, resolve_path
+from utils.config import (
+    apply_model_window_profile,
+    apply_window_experiment,
+    ensure_project_dirs,
+    normalize_window_selection,
+    resolve_path,
+)
 from utils.console_utils import create_progress, get_console, setup_console_encoding
 from utils.data_loader import prepare_window_data
 from utils.env import check_environment
@@ -215,9 +221,9 @@ def run_training_pipeline(
                 model_task_id = progress.add_task(f"[{window_name}] Models", total=len(enabled_models), stats="")
 
             for model_name in enabled_models:
-                model_cfg = window_config["models"][model_name]
                 runtime_config = copy.deepcopy(window_config)
                 runtime_config["_active_model_name"] = model_name
+                runtime_config = apply_model_window_profile(runtime_config, model_name)
 
                 step_task_id = progress.add_task(
                     f"{runtime_label(runtime_config)} Steps",
@@ -269,7 +275,7 @@ def run_training_pipeline(
                     attention_weights = getattr(model, "attention_weights", None)
                     attention_diagnostics = getattr(model, "attention_diagnostics", None)
                     if model_name == "attention_lstm" and attention_weights is not None:
-                        attention_path = resolve_path(model_cfg["attention_weights_path"])
+                        attention_path = resolve_path(runtime_config["models"][model_name]["attention_weights_path"])
                         model.save_attention_weights(attention_path)
                         save_attention_stats(runtime_config, model_name, attention_weights, attention_diagnostics)
 
